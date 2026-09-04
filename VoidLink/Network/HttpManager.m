@@ -287,14 +287,21 @@
     return [self createRequestFromString:urlString timeout:LONG_TIMEOUT_SEC];
 }
 
-- (NSURLRequest*) newQuitAppRequest {
+- (NSURLRequest*) newQuitAppRequestWithHostSessionId:(NSString*)hostSessionId {
     if (![self ensureHttpsUrlPopulated:NO]) {
         return nil;
     }
     
-    NSString* urlString = [NSString stringWithFormat:@"%@/cancel?uniqueid=%@", _baseHTTPSURL, _uniqueId];
-    NSLog(@"urlString print: %@", urlString);
-    return [self createRequestFromString:urlString timeout:LONG_TIMEOUT_SEC];
+    NSURLComponents* url = [NSURLComponents componentsWithString:[_baseHTTPSURL stringByAppendingString:@"/cancel"]];
+    NSMutableArray<NSURLQueryItem*>* queryItems = [NSMutableArray arrayWithObject:
+        [NSURLQueryItem queryItemWithName:@"uniqueid" value:_uniqueId]];
+    // Only legacy hosts omit this extension. Never retry a scoped quit without it.
+    if (hostSessionId != nil) {
+        [queryItems addObject:[NSURLQueryItem queryItemWithName:@"hostSessionId" value:hostSessionId]];
+    }
+    url.queryItems = queryItems;
+    Log(LOG_I, @"Requesting quit: %@", url.string);
+    return [self createRequestFromString:url.string timeout:LONG_TIMEOUT_SEC];
 }
 
 - (NSURLRequest*)newBirateRequest:(NSInteger)bitrateKbps forClient:(NSString* )clientName {

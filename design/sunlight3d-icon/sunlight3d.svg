@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">Sunlight 3D</title>
+  <desc id="description">A gold sun with a blue crescent inset above two curved depth planes.</desc>
+  <defs>
+    <mask id="crescent" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="black"/>
+      <circle cx="512" cy="424" r="180" fill="white"/>
+      <circle cx="580" cy="342" r="160" fill="black"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke="#E0B020" stroke-width="52" stroke-linecap="round">
+    <path d="M512 160L512 236"/>
+    <path d="M286 222L344 280"/>
+    <path d="M738 222L680 280"/>
+    <path d="M170 414L250 414"/>
+    <path d="M854 414L774 414"/>
+  </g>
+  <circle cx="512" cy="424" r="180" fill="#E0B020"/>
+  <rect width="1024" height="1024" fill="#2563EB" mask="url(#crescent)"/>
+  <path d="M188 704C342 582 682 582 836 704" fill="none" stroke="#D7E5FF" stroke-width="104" stroke-linecap="round"/>
+  <path d="M164 810C338 650 686 650 860 810" fill="none" stroke="#8AB4F8" stroke-width="112" stroke-linecap="round"/>
+</svg>

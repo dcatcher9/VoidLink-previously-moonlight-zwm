@@ -27,11 +27,10 @@
 - (NSURLRequest*) newHttpServerInfoRequest:(bool)fastFail;
 - (NSURLRequest*) newHttpServerInfoRequest;
 - (NSURLRequest*) newLaunchOrResumeRequest:(NSString*)verb config:(StreamConfiguration*)config;
-- (NSURLRequest*) newQuitAppRequest;
+// Pass nil only for a legacy host that does not advertise hostsessionid.
+- (NSURLRequest*) newQuitAppRequestWithHostSessionId:(NSString*)hostSessionId;
 - (NSURLRequest*) newAppAssetRequestWithAppId:(NSString*)appId;
 - (NSURLRequest*) newBirateRequest:(NSInteger)bitrateKbps forClient:(NSString* )clientName;
 - (void) executeRequestSynchronously:(HttpRequest*)request;
 
 @end
-
-

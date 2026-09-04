@@ -994,30 +994,120 @@ static NSMutableSet* hostList;
 }
 
 - (HttpResponse* )requestToQuitApp:(TemporaryApp* )app{
-    HttpManager* hMan = [[HttpManager alloc] initWithHost:app.host];
     HttpResponse* quitResponse = [[HttpResponse alloc] init];
-    HttpRequest* quitRequest = [HttpRequest requestForResponse: quitResponse withUrlRequest:[hMan newQuitAppRequest]];
+    TemporaryHost* host = app.host;
+    NSString* targetAppId = [app.id copy];
+    NSString* targetHostId = [host.uuid copy];
+    if (host == nil || targetAppId.length == 0 || targetHostId.length == 0) {
+        quitResponse.statusCode = 400;
+        quitResponse.statusMessage = @"No application was selected to quit. Refresh the host and try again.";
+        return quitResponse;
+    }
+    if (host.serverCert.length == 0) {
+        quitResponse.statusCode = 401;
+        quitResponse.statusMessage = @"Pair with this host before quitting its application.";
+        return quitResponse;
+    }
+
+    HttpManager* hMan = [[HttpManager alloc] initWithHost:host];
 
     // Exempt this host from discovery while handling the quit operation
-    [self->_discMan pauseDiscoveryForHost:app.host];
-    [hMan executeRequestSynchronously:quitRequest];
-    if (quitResponse.statusCode == 200) {
+    [self->_discMan pauseDiscoveryForHost:host];
+    @try {
+        // Read the session immediately before quitting. HTTP fallback cannot provide
+        // authenticated session identity and must not authorize a destructive request.
         ServerInfoResponse* serverInfoResp = [[ServerInfoResponse alloc] init];
-        [hMan executeRequestSynchronously:[HttpRequest requestForResponse:serverInfoResp withUrlRequest:[hMan newServerInfoRequest:false]
-                                                            fallbackError:401 fallbackRequest:[hMan newHttpServerInfoRequest]]];
-        if (![serverInfoResp isStatusOk] || [[serverInfoResp getStringTag:@"state"] hasSuffix:@"_SERVER_BUSY"]) {
+        [hMan executeRequestSynchronously:[HttpRequest requestForResponse:serverInfoResp
+                                                          withUrlRequest:[hMan newServerInfoRequest:false]]];
+        if (![serverInfoResp isStatusOk]) {
+            return serverInfoResp;
+        }
+        if (![[[serverInfoResp getStringTag:TAG_UNIQUE_ID] trim] isEqualToString:targetHostId] ||
+            ![[[serverInfoResp getStringTag:TAG_PAIR_STATUS] trim] isEqualToString:@"1"]) {
+            quitResponse.statusCode = 401;
+            quitResponse.statusMessage = @"The host identity or pairing changed. Refresh the host and pair again before quitting.";
+            return quitResponse;
+        }
+
+        NSString* serverState = [[serverInfoResp getStringTag:TAG_STATE] trim];
+        NSString* runningAppId = [[serverInfoResp getStringTag:TAG_CURRENT_GAME] trim];
+        if (serverState.length == 0 || runningAppId.length == 0) {
+            quitResponse.statusCode = 502;
+            quitResponse.statusMessage = @"The host did not provide its running application state. No quit request was sent.";
+            return quitResponse;
+        }
+        [serverInfoResp populateHost:host];
+        if (![serverState hasSuffix:@"_SERVER_BUSY"]) {
+            // The requested operation is already complete; do not send /cancel.
+            quitResponse.statusCode = 200;
+            return quitResponse;
+        }
+        if (![runningAppId isEqualToString:targetAppId]) {
+            quitResponse.statusCode = 409;
+            quitResponse.statusMessage = @"The running application changed. Refresh the host and select the application you want to quit.";
+            return quitResponse;
+        }
+
+        NSString* hostSessionId = nil;
+        if ([serverInfoResp getStringTag:@"hostsessionid"] != nil) {
+            uint64_t sessionId;
+            if (![serverInfoResp getUInt64Tag:@"hostsessionid" value:&sessionId] || sessionId == 0) {
+                quitResponse.statusCode = 409;
+                quitResponse.statusMessage = @"The host did not provide a valid session ID. No quit request was sent; refresh the host and try again.";
+                return quitResponse;
+            }
+            hostSessionId = [NSString stringWithFormat:@"%llu", (unsigned long long)sessionId];
+        }
+
+        Log(LOG_I, @"Quitting app %@ using %@ session identity", targetAppId, hostSessionId ? @"host-scoped" : @"legacy");
+        HttpRequest* quitRequest = [HttpRequest requestForResponse:quitResponse
+                                                   withUrlRequest:[hMan newQuitAppRequestWithHostSessionId:hostSessionId]];
+        [hMan executeRequestSynchronously:quitRequest];
+        if (![quitResponse isStatusOk]) {
+            Log(LOG_W, @"Quit failed (%ld): %@", (long)quitResponse.statusCode, quitResponse.statusMessage);
+            return quitResponse;
+        }
+
+        ServerInfoResponse* verifyResponse = [[ServerInfoResponse alloc] init];
+        [hMan executeRequestSynchronously:[HttpRequest requestForResponse:verifyResponse
+                                                          withUrlRequest:[hMan newServerInfoRequest:false]]];
+        NSString* verifiedState = [[verifyResponse getStringTag:TAG_STATE] trim];
+        NSString* verifiedAppId = [[verifyResponse getStringTag:TAG_CURRENT_GAME] trim];
+        BOOL verifiedHost = [verifyResponse isStatusOk] && verifiedState.length > 0 && verifiedAppId.length > 0 &&
+            [[[verifyResponse getStringTag:TAG_UNIQUE_ID] trim] isEqualToString:targetHostId] &&
+            [[[verifyResponse getStringTag:TAG_PAIR_STATUS] trim] isEqualToString:@"1"];
+        if (!verifiedHost || [verifiedState hasSuffix:@"_SERVER_BUSY"]) {
             // On newer GFE versions, the quit request succeeds even though the app doesn't
             // really quit if another client tries to kill your app. We'll patch the response
             // to look like the old error in that case, so the UI behaves.
             quitResponse.statusCode = 599;
+            quitResponse.statusMessage = @"The host has not confirmed that the application stopped. Refresh its status before trying again.";
         }
-        else if ([serverInfoResp isStatusOk]) {
+        if (verifiedHost) {
             // Update the host object with this info
-            [serverInfoResp populateHost:app.host];
+            [verifyResponse populateHost:host];
         }
+        Log(LOG_I, @"Quit verification result: %ld", (long)quitResponse.statusCode);
+        return quitResponse;
     }
-    [self->_discMan resumeDiscoveryForHost:app.host];
-    return quitResponse;
+    @finally {
+        [self->_discMan resumeDiscoveryForHost:host];
+    }
+}
+
+- (void)showQuitFailure:(HttpResponse*)response forHost:(TemporaryHost*)host {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString* message = response.statusMessage.length > 0 ? response.statusMessage :
+            [LocalizationHelper localizedStringForKey:@"Failed to quit app. If this app was started by another device, you'll need to quit from that device."];
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:[LocalizationHelper localizedStringForKey:@"Quitting App Failed"]
+                                                                      message:message
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:[LocalizationHelper localizedStringForKey:@"Ok"] style:UIAlertActionStyleDefault handler:nil]];
+        [self updateAppsForHost:host];
+        [self hideLoadingFrame:^{
+            [[self activeViewController] presentViewController:alert animated:YES completion:nil];
+        }];
+    });
 }
 
 - (void)quitApp:(TemporaryApp* )app{
@@ -1028,16 +1118,7 @@ static NSMutableSet* hostList;
             HttpResponse* quitResponse = [self requestToQuitApp:app];
             // If it fails, display an error and stop the current operation
             if (quitResponse.statusCode != 200) {
-                UIAlertController* alert = [UIAlertController alertControllerWithTitle:[LocalizationHelper localizedStringForKey:@"Quitting App Failed"]
-                                                                               message:[LocalizationHelper localizedStringForKey:@"Failed to quit app. If this app was started by another device, you'll need to quit from that device."]
-                                                     preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:[LocalizationHelper localizedStringForKey:@"Ok"] style:UIAlertActionStyleDefault handler:nil]];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self updateAppsForHost:app.host];
-                    [self hideLoadingFrame: ^{
-                        [[self activeViewController] presentViewController:alert animated:YES completion:nil];
-                    }];
-                });
+                [self showQuitFailure:quitResponse forHost:app.host];
             }
             else dispatch_async(dispatch_get_main_queue(), ^{[self hideLoadingFrame:nil];});
         });
@@ -1050,21 +1131,16 @@ static NSMutableSet* hostList;
 
 - (void)quitRunningAppAndStart:(TemporaryApp *)app {
     TemporaryApp* currentRunningApp = [self findRunningApp:app.host];
+    if (currentRunningApp == nil) {
+        [self launchApp:app];
+        return;
+    }
     [self showLoadingFrame: ^{
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            HttpResponse* quitResponse = [self requestToQuitApp:app];
+            HttpResponse* quitResponse = [self requestToQuitApp:currentRunningApp];
             // If it fails, display an error and stop the current operation
             if (quitResponse.statusCode != 200) {
-                UIAlertController* alert = [UIAlertController alertControllerWithTitle:[LocalizationHelper localizedStringForKey:@"Quitting App Failed"]
-                                                                               message:[LocalizationHelper localizedStringForKey:@"Failed to quit app. If this app was started by another device, you'll need to quit from that device."]
-                                                     preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:[LocalizationHelper localizedStringForKey:@"Ok"] style:UIAlertActionStyleDefault handler:nil]];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self updateAppsForHost:app.host];
-                    [self hideLoadingFrame: ^{
-                        [[self activeViewController] presentViewController:alert animated:YES completion:nil];
-                    }];
-                });
+                [self showQuitFailure:quitResponse forHost:app.host];
             }
             else {
                 app.host.currentGame = @"0";
@@ -1147,19 +1223,10 @@ static NSMutableSet* hostList;
                                         Log(LOG_I, @"Quitting application: %@", currentApp.name);
                                         [self showLoadingFrame: ^{
                                             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                                                HttpResponse* quitResponse = [self requestToQuitApp:app];
+                                                HttpResponse* quitResponse = [self requestToQuitApp:currentApp];
                                                 // If it fails, display an error and stop the current operation
                                                 if (quitResponse.statusCode != 200) {
-                                                    UIAlertController* alert = [UIAlertController alertControllerWithTitle:[LocalizationHelper localizedStringForKey:@"Quitting App Failed"]
-                                                                                                                   message:[LocalizationHelper localizedStringForKey:@"Failed to quit app. If this app was started by another device, you'll need to quit from that device."]
-                                                                                         preferredStyle:UIAlertControllerStyleAlert];
-                                                    [alert addAction:[UIAlertAction actionWithTitle:[LocalizationHelper localizedStringForKey:@"Ok"] style:UIAlertActionStyleDefault handler:nil]];
-                                                    dispatch_async(dispatch_get_main_queue(), ^{
-                                                        [self updateAppsForHost:app.host];
-                                                        [self hideLoadingFrame: ^{
-                                                            [[self activeViewController] presentViewController:alert animated:YES completion:nil];
-                                                        }];
-                                                    });
+                                                    [self showQuitFailure:quitResponse forHost:app.host];
                                                 }
                                                 else {
                                                     app.host.currentGame = @"0";
