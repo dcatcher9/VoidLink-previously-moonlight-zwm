@@ -145,6 +145,7 @@ import UIKit
     // MARK: - Touch Events
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         guard let event = event else { return }
         previousForce = 0
         previousTargetForce = 0
@@ -164,6 +165,7 @@ import UIKit
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         guard let event = event else { return }
         
         guard PencilHandler.pencilAndHoverMode == .pencilOnly || PencilHandler.pencilAndHoverMode == .hoverDisabled else {
@@ -178,6 +180,7 @@ import UIKit
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         guard let event = event else { return }
         
         guard PencilHandler.pencilAndHoverMode == .pencilOnly || PencilHandler.pencilAndHoverMode == .hoverDisabled else {
@@ -192,10 +195,11 @@ import UIKit
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        self.touchesEnded(touches, with: event)
+        self.cancelHostTouches()
     }
     
     private func handleNonPencilModes(_ touches: Set<UITouch>) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         guard let touch = touches.first else { return }
         let location = touch.location(in: streamView)
         let normalizedLocation = self.getNormalizedLocation(point: location)
@@ -203,20 +207,20 @@ import UIKit
             switch touch.phase {
             case .began where PencilHandler.pencilAndHoverMode == .pencilToMouse:
                 streamView.updateCursorLocation(location, isMouse: false)
-                LiSendMouseButtonEvent(CChar(BUTTON_ACTION_PRESS), BUTTON_LEFT)
+                self.performHostInput { _ = LiSendMouseButtonEvent(CChar(BUTTON_ACTION_PRESS), BUTTON_LEFT) }
             case .began where PencilHandler.pencilAndHoverMode == .pencilToTouch:
-                LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_DOWN), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), Float((touch.force/touch.maximumPossibleForce)/sin(touch.altitudeAngle)), 0, 0, getRotation(fromAzimuthAngle: Float(touch.azimuthAngle(in: streamView))))
+                self.performHostInput { _ = LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_DOWN), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), Float((touch.force/touch.maximumPossibleForce)/sin(touch.altitudeAngle)), 0, 0, self.getRotation(fromAzimuthAngle: Float(touch.azimuthAngle(in: streamView)))) }
             case .moved where PencilHandler.pencilAndHoverMode == .pencilToMouse:
                 streamView.updateCursorLocation(location, isMouse: false)
             case .moved where PencilHandler.pencilAndHoverMode == .pencilToTouch:
-                LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_MOVE), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), Float((touch.force/touch.maximumPossibleForce)/sin(touch.altitudeAngle)), 0, 0, getRotation(fromAzimuthAngle: Float(touch.azimuthAngle(in: streamView))))
+                self.performHostInput { _ = LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_MOVE), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), Float((touch.force/touch.maximumPossibleForce)/sin(touch.altitudeAngle)), 0, 0, self.getRotation(fromAzimuthAngle: Float(touch.azimuthAngle(in: streamView)))) }
             case .ended where PencilHandler.pencilAndHoverMode == .pencilToMouse,
                  .cancelled where PencilHandler.pencilAndHoverMode == .pencilToMouse:
                 streamView.updateCursorLocation(location, isMouse: false)
-                LiSendMouseButtonEvent(CChar(BUTTON_ACTION_RELEASE), BUTTON_LEFT)
+                self.performHostInput { _ = LiSendMouseButtonEvent(CChar(BUTTON_ACTION_RELEASE), BUTTON_LEFT) }
             case .ended where PencilHandler.pencilAndHoverMode == .pencilToTouch,
                  .cancelled where PencilHandler.pencilAndHoverMode == .pencilToTouch:
-                LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_UP), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0)
+                self.performHostInput { _ = LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_UP), 666666, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0) }
             default:
                 break
             }
@@ -370,25 +374,25 @@ import UIKit
             
             let sendableForce = strokePhase == .phase2 ? equalizedForce : targetForce
 
-            DispatchQueue.global().asyncAfter(deadline: dispatchMoment + tickMoment + delay) {
+            self.dispatchHostInput(after: dispatchMoment + tickMoment + delay) {
                 /*
                 if PencilHandler.autoHoverEnabled, eventType == UInt8(LI_TOUCH_EVENT_DOWN) {
                     LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude)))
                 }
                 */
                 
-                if strokePhase != .phase1 || !self.pencilTickEnabled {LiSendPenEvent(eventType, UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), sendableForce, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude)))}
+                if strokePhase != .phase1 || !self.pencilTickEnabled {self.performHostInput { _ = LiSendPenEvent(eventType, UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), sendableForce, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude))) }}
                 else {
-                    LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude)))
+                    self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude))) }
                 }
                 
                 if eventType == UInt8(LI_TOUCH_EVENT_UP) {
                     PencilHandler.isDrawing = false
                     if PencilHandler.pencilAndHoverMode == .hoverDisabled || !PencilHandler.hoverSupported {
-                        LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude)))
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 0.0086){
+                        self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude))) }
+                        self.dispatchHostInput(after: .now() + 0.0086){
                             if !PencilHandler.isDrawing {
-                                LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude)))
+                                self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, self.getRotation(fromAzimuthAngle: Float(azimuth)), self.getTilt(fromAltitudeAngle: Float(altitude))) }
                             }
                         }
                     }
@@ -427,11 +431,12 @@ import UIKit
 
     @available(iOS 12.1, *)
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         if !pencilProEnabled {return}
         if doubleTapShorcuts.isEmpty {return}
         let keyStrings = CommandManager.shared.extractAutoReleaseButtonStrings(from: doubleTapShorcuts[shortcutIndex])
         print("pencilInteractionDidTap \(CACurrentMediaTime())")
-        CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: keyStrings, delay: 0.1)
+        self.sendHostShortcut(cmdStrings: keyStrings, delay: 0.1)
         shortcutIndex = (shortcutIndex + 1) % doubleTapShorcuts.count
     }
     
@@ -440,6 +445,7 @@ import UIKit
         _ interaction: UIPencilInteraction,
         didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze
     ) {
+        guard (streamView as? StreamView)?.hostTouchInputAllowed == true else { return }
         if !pencilProEnabled {return}
         if PencilHandler.squeezeStartShortcut == "", PencilHandler.squeezeEndShortcut == "" {return}
         
@@ -452,12 +458,12 @@ import UIKit
 
         switch squeeze.phase {
         case .began:
-            if keepPressedUntilRelease {CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: squeezePressKeyStrings, delay: 0.1, pressOnly: true)}
-            else {CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: squeezePressKeyStrings, delay: 0.1)}
+            if keepPressedUntilRelease {self.sendHostShortcut(cmdStrings: squeezePressKeyStrings, delay: 0.1, pressOnly: true)}
+            else {self.sendHostShortcut(cmdStrings: squeezePressKeyStrings, delay: 0.1)}
             break
         case .ended, .cancelled:
-            if keepPressedUntilRelease {CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: squeezePressKeyStrings, releaseOnly: true)}
-            else {CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: squeezeReleaseKeyStrings, delay: 0.1)}
+            if keepPressedUntilRelease {self.sendHostShortcut(cmdStrings: squeezePressKeyStrings, releaseOnly: true)}
+            else {self.sendHostShortcut(cmdStrings: squeezeReleaseKeyStrings, delay: 0.1)}
             break
         default:
             break
@@ -711,21 +717,92 @@ import UIKit
     }
     
     private func attachHoverLeave(normalizedLocation:CGPoint){
-        DispatchQueue.global().asyncAfter(deadline: .now()+0.0086) {
-            LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0)
-            DispatchQueue.global().asyncAfter(deadline: .now()+0.0086) {
+        self.dispatchHostInput(after: .now()+0.0086) {
+            self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0) }
+            self.dispatchHostInput(after: .now()+0.0086) {
                 // LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0)
             }
         }
     }
     
     private func preTouchHoverActionAt(normalizedLocation:CGPoint){
-        DispatchQueue.global().asyncAfter(deadline: .now()+0.0086) {
-            LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0)
-            DispatchQueue.global().asyncAfter(deadline: .now()+0.0086) {
-                LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0)
+        self.dispatchHostInput(after: .now()+0.0086) {
+            self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0) }
+            self.dispatchHostInput(after: .now()+0.0086) {
+                self.performHostInput { _ = LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, Float(normalizedLocation.x), Float(normalizedLocation.y), 0, 0, 0, 0, 0) }
             }
         }
+    }
+
+    private var shortcutKeysDown: Set<Int16> = []
+    private var shortcutMouseButtonsDown: Set<Int32> = []
+
+    private func performHostInput(_ action: @escaping () -> Void) {
+        guard let view = streamView as? StreamView, view.hostTouchInputAllowed else { return }
+        view.performHostInput(action: action)
+    }
+
+    private func dispatchHostInput(after deadline: DispatchTime, action: @escaping () -> Void) {
+        guard let view = streamView as? StreamView else { return }
+        let generation = view.hostInputGeneration
+        DispatchQueue.global().asyncAfter(deadline: deadline) { [weak view] in
+            view?.performHostInput(generation: generation, action: action)
+        }
+    }
+
+    // Keep Pencil shortcuts inside this stream's generation; CommandManager's
+    // general delayed macro sender has no stream ownership context.
+    private func sendHostShortcut(cmdStrings: [String]?, delay: TimeInterval = 0.2,
+                                  index: Int = 0, pressOnly: Bool = false,
+                                  releaseOnly: Bool = false, generation: UInt? = nil) {
+        guard let view = streamView as? StreamView, let commands = cmdStrings else { return }
+        let commandsToSend = commands.filter { CommandManager.shortcutAllowedFunctionalButtonMappings[$0] == nil }
+        let expected = generation ?? view.hostInputGeneration
+        view.performHostInput(generation: expected) {
+            if releaseOnly || index >= commandsToSend.count {
+                if pressOnly && !releaseOnly { return }
+                for command in commandsToSend.reversed() {
+                    if let key = CommandManager.keyboardButtonMappings[command] {
+                        LiSendKeyboardEvent(key, CChar(KEY_ACTION_UP), 0)
+                        self.shortcutKeysDown.remove(key)
+                    }
+                    if let button = CommandManager.mouseButtonMappings[command] {
+                        LiSendMouseButtonEvent(CChar(BUTTON_ACTION_RELEASE), button)
+                        self.shortcutMouseButtonsDown.remove(button)
+                    }
+                }
+                return
+            }
+            let command = commandsToSend[index]
+            if let key = CommandManager.keyboardButtonMappings[command] {
+                LiSendKeyboardEvent(key, CChar(KEY_ACTION_DOWN), 0)
+                self.shortcutKeysDown.insert(key)
+            } else if let button = CommandManager.mouseButtonMappings[command] {
+                LiSendMouseButtonEvent(CChar(BUTTON_ACTION_PRESS), button)
+                self.shortcutMouseButtonsDown.insert(button)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.sendHostShortcut(cmdStrings: commandsToSend, delay: delay, index: index + 1,
+                    pressOnly: pressOnly, releaseOnly: releaseOnly, generation: expected)
+            }
+        }
+    }
+
+    // Called by StreamView under its cancellation lock; raw releases bypass the
+    // blocked admission gate and must never synthesize a new click or stroke.
+    @objc public func cancelHostTouches() {
+        LiSendPenEvent(UInt8(LI_TOUCH_EVENT_CANCEL), UInt8(LI_TOOL_TYPE_PEN), 0, 0, 0, 0, 0, 0, 0, 0)
+        LiSendPenEvent(UInt8(LI_TOUCH_EVENT_HOVER_LEAVE), UInt8(LI_TOOL_TYPE_PEN), 0, 0, 0, 0, 0, 0, 0, 0)
+        LiSendTouchEvent(UInt8(LI_TOUCH_EVENT_CANCEL), 666666, 0, 0, 0, 0, 0, 0)
+        LiSendMouseButtonEvent(CChar(BUTTON_ACTION_RELEASE), BUTTON_LEFT)
+        for key in shortcutKeysDown { LiSendKeyboardEvent(key, CChar(KEY_ACTION_UP), 0) }
+        for button in shortcutMouseButtonsDown { LiSendMouseButtonEvent(CChar(BUTTON_ACTION_RELEASE), button) }
+        shortcutKeysDown.removeAll()
+        shortcutMouseButtonsDown.removeAll()
+        strokeSampleIndex = 0
+        previousForce = 0
+        previousTargetForce = 0
+        if PencilHandler.shared === self { PencilHandler.isDrawing = false }
     }
 
 }

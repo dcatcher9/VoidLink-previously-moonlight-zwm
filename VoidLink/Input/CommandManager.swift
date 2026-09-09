@@ -51,6 +51,108 @@ import UIKit
 }
 
 
+// A stream retains one owner across every PC-shortcuts presentation. Final
+// delivery and teardown cancellation are serialized on the main thread.
+@objc public final class CommandExecutionOwner: NSObject {
+    private let canSend: () -> Bool
+    private var invalidated = false
+    private var executions: [UUID: OwnedShortcutExecution] = [:]
+
+    @objc public init(canSend: @escaping () -> Bool) {
+        self.canSend = canSend
+        super.init()
+    }
+
+    @objc public func cancelPendingCommands() {
+        precondition(Thread.isMainThread)
+        guard !invalidated else { return }
+        // Root calls this before withdrawing the old stream's ownership. If
+        // ownership is already gone, even an old key-up must not reach the new PC.
+        let releaseHeldInput = canSend()
+        invalidated = true
+        let pending = Array(executions.values)
+        executions.removeAll()
+        for execution in pending { execution.cancel(releaseHeldInput: releaseHeldInput) }
+    }
+
+    fileprivate var allowsDelivery: Bool { !invalidated && canSend() }
+
+    fileprivate func start(commands: [String], delay: TimeInterval) {
+        precondition(Thread.isMainThread)
+        guard allowsDelivery else { return }
+        let execution = OwnedShortcutExecution(owner: self, commands: commands, delay: delay)
+        executions[execution.identifier] = execution
+        execution.advance()
+    }
+
+    fileprivate func finished(_ identifier: UUID) { executions.removeValue(forKey: identifier) }
+}
+
+private final class OwnedShortcutExecution {
+    enum HeldInput: Hashable {
+        case key(Int16)
+        case mouse(Int32)
+
+        func send(down: Bool) {
+            switch self {
+            case .key(let key):
+                LiSendKeyboardEvent(key, Int8(down ? KEY_ACTION_DOWN : KEY_ACTION_UP), 0)
+            case .mouse(let button):
+                LiSendMouseButtonEvent(CChar(down ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE), button)
+            }
+        }
+    }
+
+    let identifier = UUID()
+    private weak var owner: CommandExecutionOwner?
+    private let commands: [String]
+    private let delay: TimeInterval
+    private var index = 0
+    private var held: [HeldInput] = []
+    private var finished = false
+
+    init(owner: CommandExecutionOwner, commands: [String], delay: TimeInterval) {
+        self.owner = owner
+        self.commands = commands
+        self.delay = max(0, delay)
+    }
+
+    func advance() {
+        precondition(Thread.isMainThread)
+        guard !finished else { return }
+        guard owner?.allowsDelivery == true else {
+            cancel(releaseHeldInput: false)
+            return
+        }
+        guard index < commands.count else {
+            cancel(releaseHeldInput: true)
+            return
+        }
+        let command = commands[index]
+        index += 1
+        let input: HeldInput?
+        if let key = CommandManager.keyboardButtonMappings[command] { input = .key(key) }
+        else if let button = CommandManager.mouseButtonMappings[command] { input = .mouse(button) }
+        else { input = nil }
+        if let input {
+            input.send(down: true)
+            if !held.contains(input) { held.append(input) }
+        }
+        // The sequence retains its original owner; no later lookup can follow
+        // a newly presented toolbox or a successor stream.
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.advance() }
+    }
+
+    func cancel(releaseHeldInput: Bool) {
+        precondition(Thread.isMainThread)
+        guard !finished else { return }
+        finished = true
+        if releaseHeldInput { for input in held.reversed() { input.send(down: false) } }
+        held.removeAll()
+        owner?.finished(identifier)
+    }
+}
+
 // Define the CommandManager class
 @objc public class CommandManager: NSObject {
     @objc public static let shared = CommandManager()
@@ -561,9 +663,6 @@ import UIKit
             return nil
         }
         
-        for (index, key) in validKeyStrings.enumerated() {
-            // print("Valid Key \(index): \(key)")
-        }
         
         return validKeyStrings
         
@@ -727,6 +826,15 @@ import UIKit
         }
     }
     
+    // The explicit PC-shortcuts surface supplies its original stream owner.
+    // Ownerless call sites continue using the existing sender unchanged.
+    public func sendOwnedAutoReleaseComboCommand(cmdStrings: [String]?, delay: TimeInterval = 0.2,
+                                                owner: CommandExecutionOwner) {
+        guard let cmdStrings else { return }
+        let commands = cmdStrings.filter { Self.shortcutAllowedFunctionalButtonMappings[$0] == nil }
+        owner.start(commands: commands, delay: delay)
+    }
+
     @objc public func sendAutoReleaseComboCommand(cmdStrings: [String]?, delay: TimeInterval = 0.2, index: Int = 0, pressOnly: Bool = false, releaseOnly:Bool = false) { // we need a large delay for WAN streaming
         // 如果已处理完所有按键，则开始释放按键
         guard var cmdStrings = cmdStrings else { return }

@@ -53,11 +53,19 @@ class HostCardView: UIView {
     private var buttonLabelFontSize: CGFloat = 0
     private var iconAndButtonSpacing: CGFloat = 0
     private var defaultBlue: UIColor = ThemeManager.appPrimaryColor
-    private var defaultGreen: UIColor = UIColor(red: 52 / 255, green: 199 / 255, blue: 89 / 255, alpha: 1)
+    private var defaultGreen: UIColor = SunlightUITheme.statusOKColor()
     private var backgroundLayer: CAGradientLayer!
     private var longPressFired = false
+    private var refreshTimer: Timer?
 
     private static let refreshCycle: TimeInterval = 2
+    private static let baseContentPadding: CGFloat = 13
+    private static let baseIconSize: CGFloat = 80
+    private static let baseIconAndButtonSpacing: CGFloat = 37
+    private static let baseButtonHeight: CGFloat = 39
+    static var unscaledHeight: CGFloat {
+        baseContentPadding * 2 + baseIconSize + baseIconAndButtonSpacing + baseButtonHeight + 1
+    }
     private let stateUnknown = State(rawValue: 0)!
     private let stateOffline = State(rawValue: 1)!
     private let stateOnline = State(rawValue: 2)!
@@ -70,7 +78,7 @@ class HostCardView: UIView {
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        setupUI()
+        commonInit()
     }
 
     @objc(initWithHost:)
@@ -90,10 +98,10 @@ class HostCardView: UIView {
         buttonLabelFontSize = 15 * sizeFactor
         longPressFired = false
         computerIconMonitorCenterYOffset = isIPhone() ? -2.75 * sizeFactor : -3.2 * sizeFactor
-        iconAndButtonSpacing = 37 * sizeFactor
-        buttonHeight = 39 * sizeFactor
+        iconAndButtonSpacing = Self.baseIconAndButtonSpacing * sizeFactor
+        buttonHeight = Self.baseButtonHeight * sizeFactor
         defaultBlue = ThemeManager.appPrimaryColor
-        defaultGreen = UIColor(red: 52 / 255, green: 199 / 255, blue: 89 / 255, alpha: 1)
+        defaultGreen = SunlightUITheme.statusOKColor()
 
         let longPressRecognizer = UILongPressGestureRecognizer(target: self, action: #selector(hostCardLongPressed(_:)))
         addGestureRecognizer(longPressRecognizer)
@@ -182,7 +190,7 @@ class HostCardView: UIView {
     private func setupUI() {
         isUserInteractionEnabled = true
         backgroundColor = ThemeManager.widgetBackgroundColor
-        cardContentpadding = 13 * sizeFactor
+        cardContentpadding = Self.baseContentPadding * sizeFactor
         clipsToBounds = true
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -199,7 +207,7 @@ class HostCardView: UIView {
         widthConstraint = widthAnchor.constraint(equalToConstant: 300)
         widthConstraint.isActive = true
 
-        iconBackgroundView = UIView(frame: CGRect(x: cardContentpadding, y: cardContentpadding, width: 80 * sizeFactor, height: 80 * sizeFactor))
+        iconBackgroundView = UIView(frame: CGRect(x: cardContentpadding, y: cardContentpadding, width: Self.baseIconSize * sizeFactor, height: Self.baseIconSize * sizeFactor))
         iconBackgroundView.backgroundColor = defaultBlue
         iconBackgroundView.layer.cornerRadius = 2 * CGFloat(UInt16(20 * sizeFactor / 2))
         if #available(iOS 13.0, *) {
@@ -210,15 +218,7 @@ class HostCardView: UIView {
         hostIconView = UIImageView()
         hostIconView.translatesAutoresizingMaskIntoConstraints = false
         hostIconView.contentMode = .scaleAspectFit
-        if #available(iOS 13.0, *) {
-            hostIconView.image = UIImage(named: "display")?.withRenderingMode(.alwaysTemplate)
-        } else {
-            hostIconView.image = UIImage(named: "Computer")
-            NSLayoutConstraint.activate([
-                hostIconView.heightAnchor.constraint(equalToConstant: 57 * sizeFactor),
-                hostIconView.widthAnchor.constraint(equalToConstant: 57 * sizeFactor),
-            ])
-        }
+        hostIconView.image = SunlightMoonlightIcons.imageNamed("ic_computer")
         hostIconView.tintColor = .white
         iconBackgroundView.addSubview(hostIconView)
         NSLayoutConstraint.activate([
@@ -300,7 +300,10 @@ class HostCardView: UIView {
         appButton = UIButton(type: .system)
         appButton.translatesAutoresizingMaskIntoConstraints = false
         appButton.frame = CGRect(x: 20, y: 200, width: 150, height: buttonHeight)
-        appButton.setTitle(LocalizationHelper.localizedString(forKey: "Applications"), for: .normal)
+        appButton.setTitle(LocalizationHelper.localizedString(forKey: "Library"), for: .normal)
+        appButton.setImage(SunlightMoonlightIcons.imageNamed("ic_xr_library"), for: .normal)
+        appButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
+        appButton.accessibilityLabel = NSLocalizedString("Open library", comment: "")
         appButton.setTitleColor(ThemeManager.textColorGray, for: .normal)
         appButton.titleLabel?.font = .systemFont(ofSize: buttonLabelFontSize)
         appButton.addTarget(self, action: #selector(appButtonTapped), for: .primaryActionTriggered)
@@ -315,7 +318,7 @@ class HostCardView: UIView {
         launchButton = UIButton(type: .system)
         launchButton.translatesAutoresizingMaskIntoConstraints = false
         launchButton.frame = CGRect(x: 0, y: 0, width: 150, height: 50)
-        launchButton.backgroundColor = defaultBlue
+        launchButton.backgroundColor = SunlightUITheme.deepAccentColor()
         launchButton.layer.cornerRadius = 2 * CGFloat(UInt16(cardWidth * 0.0377 / 2))
         if #available(iOS 13.0, *) {
             launchButton.layer.cornerCurve = .continuous
@@ -345,7 +348,7 @@ class HostCardView: UIView {
         if #available(iOS 13.0, *) {
             pairButton.layer.cornerCurve = .continuous
         }
-        pairButton.setTitle(LocalizationHelper.localizedString(forKey: "  Pair with PIN"), for: .normal)
+        pairButton.setTitle(LocalizationHelper.localizedString(forKey: "Pair"), for: .normal)
         pairButton.setTitleColor(defaultBlue, for: .normal)
         pairButton.titleLabel?.font = .boldSystemFont(ofSize: buttonLabelFontSize)
         if #available(iOS 13.0, *) {
@@ -371,7 +374,7 @@ class HostCardView: UIView {
         if #available(iOS 13.0, *) {
             wakeupButton.layer.cornerCurve = .continuous
         }
-        wakeupButton.setTitle(LocalizationHelper.localizedString(forKey: "  Wake-on-LAN"), for: .normal)
+        wakeupButton.setTitle(LocalizationHelper.localizedString(forKey: "Wake"), for: .normal)
         wakeupButton.setTitleColor(defaultBlue, for: .normal)
         wakeupButton.titleLabel?.font = .boldSystemFont(ofSize: buttonLabelFontSize)
         wakeupButton.addTarget(self, action: #selector(wakeupButtonTapped), for: .primaryActionTriggered)
@@ -384,7 +387,7 @@ class HostCardView: UIView {
         ])
 
         separatorLine = UIView()
-        separatorLine.backgroundColor = UIColor(white: 0.3, alpha: 5)
+        separatorLine.backgroundColor = SunlightUITheme.borderColor()
         separatorLine.translatesAutoresizingMaskIntoConstraints = false
         addSubview(separatorLine)
         NSLayoutConstraint.activate([
@@ -416,21 +419,15 @@ class HostCardView: UIView {
     }
 
     private func updateBackgroundLayerTheme() {
-        let gradientColorDark = UIColor(red: 0, green: 0.319, blue: 0.64, alpha: 1)
-        let gradientColorLight = gradientColorDark.withAlphaComponent(0.52)
-        let gradientColor = ThemeManager.userInterfaceStyle() == .dark ? gradientColorDark.cgColor : gradientColorLight.cgColor
-        backgroundLayer.colors = [
-            UIColor.clear.cgColor,
-            UIColor.clear.cgColor,
-            UIColor.clear.cgColor,
-            gradientColor,
-        ]
+        backgroundLayer.colors = [SunlightUITheme.raisedColor().cgColor, SunlightUITheme.raisedColor().cgColor]
+        layer.borderWidth = 1
+        layer.borderColor = SunlightUITheme.tileBorderColor().cgColor
     }
 
     private func createBackgroundLayer() {
         backgroundLayer = CAGradientLayer()
         updateBackgroundLayerTheme()
-        backgroundLayer.locations = [0, 0.18, 0.5, 1]
+        backgroundLayer.locations = [0, 1]
         backgroundLayer.startPoint = CGPoint(x: 0.25, y: 0.5)
         backgroundLayer.endPoint = CGPoint(x: 0.75, y: 0.5)
         let transform = CGAffineTransform(a: -1.01, b: -1, c: 1, d: -3.67, tx: 0.5, ty: 2.83)
@@ -461,10 +458,28 @@ class HostCardView: UIView {
     }
 
     override func didMoveToSuperview() {
-        if superview != nil && host != nil {
-            NSLog("start update loop")
-            updateLoop()
+        super.didMoveToSuperview()
+        updateRefreshTimer()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateRefreshTimer()
+    }
+
+    private func updateRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard superview != nil, window != nil, host != nil else { return }
+
+        updateLoop()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: Self.refreshCycle, repeats: true) { [weak self] _ in
+            self?.updateLoop()
         }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -479,11 +494,7 @@ class HostCardView: UIView {
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now()+0.36) { [weak self] in
-            self?.updateContents(for: self?.host)
-        }
-        
-        perform(#selector(updateLoop), with: self, afterDelay: Self.refreshCycle)
+        updateContents(for: host)
     }
 
     private func updateContents(for host: TemporaryHost?) {
@@ -507,7 +518,10 @@ class HostCardView: UIView {
                 hostIconView.tintColor = .white
                 iconBackgroundView.backgroundColor = defaultBlue
                 lockIconView.isHidden = true
-                appButton.setTitle(LocalizationHelper.localizedString(forKey: "Applications"), for: .normal)
+                appButton.setTitle(LocalizationHelper.localizedString(forKey: "Library"), for: .normal)
+                appButton.setImage(SunlightMoonlightIcons.imageNamed("ic_xr_library"), for: .normal)
+                appButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 6)
+                appButton.accessibilityLabel = NSLocalizedString("Open library", comment: "")
                 launchButton.setTitle(LocalizationHelper.localizedString(forKey: "  Launch"), for: .normal)
                 appButton.isEnabled = true
                 launchButton.isEnabled = true
@@ -520,7 +534,7 @@ class HostCardView: UIView {
                     let config = UIImage.SymbolConfiguration(pointSize: buttonHeight * 0.263)
                     launchButton.setImage(UIImage(systemName: "play.fill", withConfiguration: config), for: .normal)
                 }
-                launchButton.backgroundColor = defaultBlue
+                launchButton.backgroundColor = SunlightUITheme.deepAccentColor()
                 launchButton.setTitleColor(.white, for: .normal)
             } else {
                 iconBackgroundView.backgroundColor = ThemeManager.appPrimaryColorWithAlpha

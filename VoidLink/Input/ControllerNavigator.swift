@@ -668,7 +668,6 @@ final class ControllerNavigator: NSObject {
                     return
                 }
                 
-                let navigationSettingsItem = RadialMenuSector(title: "Navigation Settings".localized, subtitle: "", symbol:"gear", item: .navigationSettings)
                 
                 if radialMenuState == .moreOptions {
                     if mainFrameVC.isStreaming() {
@@ -678,10 +677,8 @@ final class ControllerNavigator: NSObject {
                     else {
                         if !mainFrameVC.isInAppView(), !mainFrameVC.settingsViewExpanded {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "About".localized, subtitle: "", symbol: "questionmark.circle", item: .aboutView))}
                         if !mainFrameVC.settingsViewExpanded {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Theme".localized, subtitle: "", symbol: "circle.lefthalf.filled", item: .theme))}
-                        if !mainFrameVC.settingsViewExpanded {RadialMenuOverlayView.menuSectors.appendIfNotContains(navigationSettingsItem)}
                         if !mainFrameVC.settingsViewExpanded {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Exit".localized, subtitle: "", symbol: "rectangle.portrait.and.arrow.right", item: .exit))}
                     }
-                    RadialMenuOverlayView.menuSectors.appendIfNotContains(navigationSettingsItem)
                     
                     radialMenuView = RadialMenuOverlayView.presentInKeyWindow()
                     listenToRadialMenuStick()
@@ -690,13 +687,14 @@ final class ControllerNavigator: NSObject {
                 
                 let gameProfileItem = RadialMenuSector(title: "Game Profiles".localized, subtitle: "", symbol:PublicUtils.iOS18Available ? "gamecontroller.circle" : "gamecontroller.fill", item: .gameProfiles)
                 
-                RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Settings Menu".localized, subtitle: "", symbol: "sidebar.left", item: .settings))
+                let settingsTitle = mainFrameVC.isStreaming() ? "Stream controls" : (mainFrameVC.isInAppView() ? "PC settings" : "Global settings")
+                let settingsSymbol = mainFrameVC.isStreaming() || mainFrameVC.isInAppView() ? "slider.horizontal.3" : "gearshape"
+                RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: settingsTitle.localized, subtitle: "", symbol: settingsSymbol, item: .settings))
                 
                 if mainFrameVC.settingsViewExpanded {
                     if mainFrameVC.settingsViewController.currentSettingsMenuMode == .AllSettings {
                         RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Favorite Settings".localized, subtitle: "", symbol: "bookmark", item: .favoriteSettings))
                         RadialMenuOverlayView.menuSectors.appendIfNotContains(gameProfileItem)
-                        RadialMenuOverlayView.menuSectors.appendIfNotContains(navigationSettingsItem)
                     }
                     if mainFrameVC.settingsViewController.currentSettingsMenuMode == .FavoriteSettings {
                         RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "All Settings".localized, subtitle: "", symbol: "circle.grid.3x3", item: .allSettings))

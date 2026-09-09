@@ -14,6 +14,8 @@
 
 #include "Limelight.h"
 
+@class TemporarySettings;
+
 @interface VideoDecoderRenderer : NSObject
 
 @property (atomic, readonly) PlotMetrics decodeMetrics;
@@ -23,19 +25,33 @@
 @property (atomic, readonly) int32_t queueSize;
 
 @property (nonatomic, strong, readonly) AVSampleBufferDisplayLayer *displayLayer;
+// Glasses output (including 2D) uses one Metal consumer for independent eye layout.
+// Configure before setupWithVideoFormat: so decoder pacing matches the connection.
+@property (nonatomic) BOOL stereoPresentation;
 
 - (id)initWithView:(UIView*)view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio;
+// A resolved connection snapshot keeps per-PC pacing/backend choices independent
+// of subsequent global-default edits. Nil preserves the legacy initializer.
+- (id)initWithView:(UIView*)view callbacks:(id<ConnectionCallbacks>)callbacks
+ streamAspectRatio:(float)aspectRatio presentationSettings:(TemporarySettings * _Nullable)settings;
+// Called only after Connection owns the process-wide streaming session.
+- (void)activateForStreaming;
 
 - (void)setupWithVideoFormat:(int)videoFormat width:(int)videoWidth height:(int)videoHeight frameRate:(int)frameRate fullRange:(BOOL)fullRange request10BitCodec:(BOOL)enableHdr;
 
 - (void)renderFrame:(Frame *)frame atTime:(CMTime)targetTime;
+// Retires main-thread display callbacks before common tears down its video queue.
+- (void)stop;
 - (void)cleanup;
 - (void)setHdrMode:(BOOL)enabled;
 - (void)safeCopyMetricsTo:(PlotMetrics *)dst from:(PlotMetrics *)src;
 - (void)getAllStats:(video_stats_t *)stats;
 - (uint64_t)renderedInterpolatedFrameCount;
-- (void)optimizeRefreshRate;
+// Clears only this active renderer's presentation queue, never a successor's.
+- (void)setRequeuingRequired:(BOOL)required;
 - (void)resetFramePacing;
+// Called after the stream controller resolves whether PiP remains active.
+- (void)setDecodingPausedForBackground:(BOOL)paused;
 
 - (int)submitDecodeBuffer:(unsigned char *)data
                    length:(int)length

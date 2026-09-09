@@ -6756,25 +6756,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink now supports global controller navigation! Go to [Settings Menu] → [Controller] section → turn [Controller Navigation] off and on again to customize radial menu buttons and controller mouse mode. \nRadial menu button is by default:\n[RT], and long pressing [Start] during streaming.\n"
+            "value" : "Sunlight 3D now supports global controller navigation! Go to [Settings Menu] → [Controller] section → turn [Controller Navigation] off and on again to customize radial menu buttons and controller mouse mode. \nRadial menu button is by default:\n[RT], and long pressing [Start] during streaming.\n"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink已支持全局手柄导航！前往 [设置菜单] → [手柄] 分区 → 关闭再打开 [手柄导航]，即可自定义环形菜单按键与手柄鼠标模式。\n默认环形菜单按键为 [右板机]，串流状态下为长按 [Start] 键。"
+            "value" : "Sunlight 3D已支持全局手柄导航！前往 [设置菜单] → [手柄] 分区 → 关闭再打开 [手柄导航]，即可自定义环形菜单按键与手柄鼠标模式。\n默认环形菜单按键为 [右板机]，串流状态下为长按 [Start] 键。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
+            "value" : "Sunlight 3D 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
+            "value" : "Sunlight 3D 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
           }
         }
       }
@@ -8934,25 +8934,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nKeyboard Shortcuts for VoidLink (Desktop Mode):\n\nCtrl + Alt + Shift + D — Disconnect the current session\n\nCtrl + Alt + Shift + Q — Disconnect the current session and quit current app\n\nCtrl + Alt + Shift + S — Expand the settings menu\n\nCtrl + Alt + Shift + O — Toggle the statistics overlay\n\nCtrl + Alt + Shift + C — Toggle mouse pointer visibility"
+            "value" : "\nKeyboard Shortcuts for Sunlight 3D (Desktop Mode):\n\nCtrl + Alt + Shift + D — Disconnect the current session\n\nCtrl + Alt + Shift + Q — Disconnect the current session and quit current app\n\nCtrl + Alt + Shift + S — Expand the settings menu\n\nCtrl + Alt + Shift + O — Toggle the statistics overlay\n\nCtrl + Alt + Shift + C — Toggle mouse pointer visibility"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快捷键：\n\nCtrl + Alt + Shift + D — 断开当前会话\n\nCtrl + Alt + Shift + Q — 断开当前会话并退出当前app\n\nCtrl + Alt + Shift + S — 展开设置菜单\n\nCtrl + Alt + Shift + O — 切换性能信息叠加\n\nCtrl + Alt + Shift + C — 切换鼠标指针可见性"
+            "value" : "\nSunlight 3D 桌面模式快捷键：\n\nCtrl + Alt + Shift + D — 断开当前会话\n\nCtrl + Alt + Shift + Q — 断开当前会话并退出当前app\n\nCtrl + Alt + Shift + S — 展开设置菜单\n\nCtrl + Alt + Shift + O — 切换性能信息叠加\n\nCtrl + Alt + Shift + C — 切换鼠标指针可见性"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快速鍵：\n\nCtrl + Alt + Shift + D — 中斷目前連線\n\nCtrl + Alt + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl + Alt + Shift + S — 展開設定選單\n\nCtrl + Alt + Shift + O — 切換統計資訊覆蓋\n\nCtrl + Alt + Shift + C — 切換滑鼠指標可見性"
+            "value" : "\nSunlight 3D 桌面模式快速鍵：\n\nCtrl + Alt + Shift + D — 中斷目前連線\n\nCtrl + Alt + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl + Alt + Shift + S — 展開設定選單\n\nCtrl + Alt + Shift + O — 切換統計資訊覆蓋\n\nCtrl + Alt + Shift + C — 切換滑鼠指標可見性"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快速鍵：\n\nCtrl + Alt + Shift + D — 中斷目前連線\n\nCtrl + Alt + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl + Alt + Shift + S — 展開設定選單\n\nCtrl + Alt + Shift + O — 切換統計資訊覆蓋\n\nCtrl + Alt + Shift + C — 切換滑鼠指標可見性"
+            "value" : "\nSunlight 3D 桌面模式快速鍵：\n\nCtrl + Alt + Shift + D — 中斷目前連線\n\nCtrl + Alt + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl + Alt + Shift + S — 展開設定選單\n\nCtrl + Alt + Shift + O — 切換統計資訊覆蓋\n\nCtrl + Alt + Shift + C — 切換滑鼠指標可見性"
           }
         }
       }
@@ -9862,25 +9862,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hello! I'm the VoidLink gamepad live feedback overlay. \n\n1. You can use the \"🎮 overlay” button in the widget menu to turn me on or off.\n\n2. I can be resized by double-tap or two-finger pinch, and moved by dragging directly."
+            "value" : "Hello! I'm the Sunlight 3D gamepad live feedback overlay. \n\n1. You can use the \"🎮 overlay” button in the widget menu to turn me on or off.\n\n2. I can be resized by double-tap or two-finger pinch, and moved by dragging directly."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "你好！我是 VoidLink 手柄实时反馈叠加层。\n\n1. 控件菜单中的 \"🎮叠加” 按键可以打开或关闭我。\n\n2. 我可以由双击或双指捏合改变大小、直接拖动改变位置。"
+            "value" : "你好！我是 Sunlight 3D 手柄实时反馈叠加层。\n\n1. 控件菜单中的 \"🎮叠加” 按键可以打开或关闭我。\n\n2. 我可以由双击或双指捏合改变大小、直接拖动改变位置。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "你好！我是 VoidLink 手把即時反饋疊加層。\n\n1. 控制選單中的「🎮疊加」按鍵可以開啟或關閉我。\n\n2. 我可以透過雙擊或雙指捏合改變大小，也可以直接拖曳改變位置。"
+            "value" : "你好！我是 Sunlight 3D 手把即時反饋疊加層。\n\n1. 控制選單中的「🎮疊加」按鍵可以開啟或關閉我。\n\n2. 我可以透過雙擊或雙指捏合改變大小，也可以直接拖曳改變位置。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "你好！我是 VoidLink 手把即時反饋疊加層。\n\n1. 控制選單中的「🎮疊加」按鍵可以開啟或關閉我。\n\n2. 我可以透過雙擊或雙指捏合改變大小，也可以直接拖曳改變位置。"
+            "value" : "你好！我是 Sunlight 3D 手把即時反饋疊加層。\n\n1. 控制選單中的「🎮疊加」按鍵可以開啟或關閉我。\n\n2. 我可以透過雙擊或雙指捏合改變大小，也可以直接拖曳改變位置。"
           }
         }
       }
@@ -11171,25 +11171,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nKeyboard Shortcuts for VoidLink (Desktop Mode):\n\nCtrl(Control) + Alt(Opt) + Shift + D — Disconnect the current session\n\nCtrl(Control) + Alt(Opt) + Shift + Q — Disconnect the current session and quit current app\n\nCtrl(Control) + Alt(Opt) + Shift + S — Expand the settings menu\n\nCtrl(Control) + Alt(Opt) + Shift + O — Toggle the statistics overlay\n\nCtrl(Control) + Alt(Opt) + Shift + C — Toggle mouse pointer visibility\n\nBy default, the mouse cursor can’t be moved out of app window. To do this, please disconnect the current session, then go to Settings → Peripheral Section → Local Mouse Cursor, and select “Visible” (Note: you can’t control the camera in 3D games by this mode)"
+            "value" : "\nKeyboard Shortcuts for Sunlight 3D (Desktop Mode):\n\nCtrl(Control) + Alt(Opt) + Shift + D — Disconnect the current session\n\nCtrl(Control) + Alt(Opt) + Shift + Q — Disconnect the current session and quit current app\n\nCtrl(Control) + Alt(Opt) + Shift + S — Expand the settings menu\n\nCtrl(Control) + Alt(Opt) + Shift + O — Toggle the statistics overlay\n\nCtrl(Control) + Alt(Opt) + Shift + C — Toggle mouse pointer visibility\n\nBy default, the mouse cursor can’t be moved out of app window. To do this, please disconnect the current session, then go to Settings → Peripheral Section → Local Mouse Cursor, and select “Visible” (Note: you can’t control the camera in 3D games by this mode)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快捷键：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 断开当前会话\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 断开当前会话并退出当前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展开设置菜单\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切换性能信息叠加\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切换鼠标指针可见性\n\n默认状态下鼠标无法移出 app 窗口。如需做到这点，请断开当前会话，前往设置菜单 -> 外设分区 -> 本地鼠标指针，选择“可见” (注意：该模式无法操控 3D 游戏视角)。"
+            "value" : "\nSunlight 3D 桌面模式快捷键：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 断开当前会话\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 断开当前会话并退出当前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展开设置菜单\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切换性能信息叠加\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切换鼠标指针可见性\n\n默认状态下鼠标无法移出 app 窗口。如需做到这点，请断开当前会话，前往设置菜单 -> 外设分区 -> 本地鼠标指针，选择“可见” (注意：该模式无法操控 3D 游戏视角)。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快速鍵：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 中斷目前連線\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展開設定選單\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切換統計資訊覆蓋\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切換滑鼠指標可見性\n\n預設狀態下，滑鼠無法移出 App 視窗。如需做到這點，請中斷連線，前往設定選單 -> 外設分區 -> 本地滑鼠指標，選擇「可見」（注意：此模式無法操控 3D 遊戲視角）。"
+            "value" : "\nSunlight 3D 桌面模式快速鍵：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 中斷目前連線\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展開設定選單\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切換統計資訊覆蓋\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切換滑鼠指標可見性\n\n預設狀態下，滑鼠無法移出 App 視窗。如需做到這點，請中斷連線，前往設定選單 -> 外設分區 -> 本地滑鼠指標，選擇「可見」（注意：此模式無法操控 3D 遊戲視角）。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nVoidLink 桌面模式快速鍵：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 中斷目前連線\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展開設定選單\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切換統計資訊覆蓋\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切換滑鼠指標可見性\n\n預設狀態下，滑鼠無法移出 App 視窗。如需做到這點，請中斷連線，前往設定選單 -> 外設分區 -> 本地滑鼠指標，選擇「可見」（注意：此模式無法操控 3D 遊戲視角）。"
+            "value" : "\nSunlight 3D 桌面模式快速鍵：\n\nCtrl(Control) + Alt(Opt) + Shift + D — 中斷目前連線\n\nCtrl(Control) + Alt(Opt) + Shift + Q — 中斷目前連線並退出目前app\n\nCtrl(Control) + Alt(Opt) + Shift + S — 展開設定選單\n\nCtrl(Control) + Alt(Opt) + Shift + O — 切換統計資訊覆蓋\n\nCtrl(Control) + Alt(Opt) + Shift + C — 切換滑鼠指標可見性\n\n預設狀態下，滑鼠無法移出 App 視窗。如需做到這點，請中斷連線，前往設定選單 -> 外設分區 -> 本地滑鼠指標，選擇「可見」（注意：此模式無法操控 3D 遊戲視角）。"
           }
         }
       }
@@ -12325,25 +12325,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\nWait!\n\n- VoidLink's standard rendering mode already delivers extremely strong performance, on par with its own Metal rendering\n\n- Metal HDR rendering requires developer custom shaders, and regardless of any claims otherwise, no Metal renderer can reproduce the VoidLink standard renderer’s device-calibrated HDR accuracy.\n\n- Metal rendering mode does not support PiP.\n\n- Tapping “Apply” means I acknowledge the above information."
+            "value" : "\nWait!\n\n- Sunlight 3D's standard rendering mode already delivers extremely strong performance, on par with its own Metal rendering\n\n- Metal HDR rendering requires developer custom shaders, and regardless of any claims otherwise, no Metal renderer can reproduce the Sunlight 3D standard renderer’s device-calibrated HDR accuracy.\n\n- Metal rendering mode does not support PiP.\n\n- Tapping “Apply” means I acknowledge the above information."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\n等等！\n\n- VoidLink 标准渲染模式的性能已相当出色，不仅与自身的 Metal 渲染器处于同等水准，更大幅超越一些以 vibe coding 打造的所谓 Metal 渲染器。\n\n- Metal 渲染需消耗更多GPU资源和电量，在某些设备上可能会导致性能下降。\n\n- Metal HDR 渲染需要开发者自行编写着色器。无论开发者如何宣称，任何 Metal 渲染器都无法还原 VoidLink 标准渲染器经过设备校准的 HDR 准确性。\n\n- Metal 渲染模式下不支持画中画。\n\n点击“应用”表示我已知晓并认可以上信息。"
+            "value" : "\n等等！\n\n- Sunlight 3D 标准渲染模式的性能已相当出色，不仅与自身的 Metal 渲染器处于同等水准，更大幅超越一些以 vibe coding 打造的所谓 Metal 渲染器。\n\n- Metal 渲染需消耗更多GPU资源和电量，在某些设备上可能会导致性能下降。\n\n- Metal HDR 渲染需要开发者自行编写着色器。无论开发者如何宣称，任何 Metal 渲染器都无法还原 Sunlight 3D 标准渲染器经过设备校准的 HDR 准确性。\n\n- Metal 渲染模式下不支持画中画。\n\n点击“应用”表示我已知晓并认可以上信息。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "needs_review",
-            "value" : "\n等等！\n\n- VoidLink 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 VoidLink 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
+            "value" : "\n等等！\n\n- Sunlight 3D 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 Sunlight 3D 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "needs_review",
-            "value" : "\n等等！\n\n- VoidLink 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 VoidLink 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
+            "value" : "\n等等！\n\n- Sunlight 3D 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 Sunlight 3D 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
           }
         }
       }
@@ -13518,25 +13518,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink supports rich, powerful custom on screen widgets including keyboard buttons, gamepad button & joysticks, mouse touchpad & button. Check online document for detail."
+            "value" : "Sunlight 3D supports rich, powerful custom on screen widgets including keyboard buttons, gamepad button & joysticks, mouse touchpad & button. Check online document for detail."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink具备丰富而强大的自定义屏显控件，类型包括：键盘按键、手柄按键和摇杆、鼠标触摸板和按键等。详见在线文档。"
+            "value" : "Sunlight 3D具备丰富而强大的自定义屏显控件，类型包括：键盘按键、手柄按键和摇杆、鼠标触摸板和按键等。详见在线文档。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 提供豐富且強大的自訂螢幕顯示元件，類型包含：鍵盤按鍵、手把按鍵與搖桿、滑鼠觸控板及按鍵等。詳細資訊請參考線上說明文件。"
+            "value" : "Sunlight 3D 提供豐富且強大的自訂螢幕顯示元件，類型包含：鍵盤按鍵、手把按鍵與搖桿、滑鼠觸控板及按鍵等。詳細資訊請參考線上說明文件。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 提供豐富且強大的自訂螢幕顯示元件，類型包含：鍵盤按鍵、手把按鍵與搖桿、滑鼠觸控板及按鍵等。詳細資訊請參考線上說明文件。"
+            "value" : "Sunlight 3D 提供豐富且強大的自訂螢幕顯示元件，類型包含：鍵盤按鍵、手把按鍵與搖桿、滑鼠觸控板及按鍵等。詳細資訊請參考線上說明文件。"
           }
         }
       }
@@ -17819,25 +17819,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "- VoidLink's standard rendering mode already delivers extremely strong performance, on par with its own Metal rendering\n\n- Metal HDR rendering requires developer custom shaders, and regardless of any claims otherwise, no Metal renderer can reproduce the VoidLink standard renderer’s device-calibrated HDR accuracy.\n\n- Metal rendering mode does not support PiP.\n\n- Tapping “Apply” means I acknowledge the above information."
+            "value" : "- Sunlight 3D's standard rendering mode already delivers extremely strong performance, on par with its own Metal rendering\n\n- Metal HDR rendering requires developer custom shaders, and regardless of any claims otherwise, no Metal renderer can reproduce the Sunlight 3D standard renderer’s device-calibrated HDR accuracy.\n\n- Metal rendering mode does not support PiP.\n\n- Tapping “Apply” means I acknowledge the above information."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "- VoidLink 标准渲染模式的性能已相当出色，不仅与自身的 Metal 渲染器处于同等水准，更大幅超越一些以 vibe coding 打造的所谓 Metal 渲染器。\n\n- Metal 渲染需消耗更多GPU资源和电量，在某些设备上可能会导致性能下降。\n\n- Metal HDR 渲染需要开发者自行编写着色器。无论开发者如何宣称，任何 Metal 渲染器都无法还原 VoidLink 标准渲染器经过设备校准的 HDR 准确性。\n\n- Metal 渲染模式下不支持画中画。\n\n点击“应用”表示我已知晓并认可以上信息。"
+            "value" : "- Sunlight 3D 标准渲染模式的性能已相当出色，不仅与自身的 Metal 渲染器处于同等水准，更大幅超越一些以 vibe coding 打造的所谓 Metal 渲染器。\n\n- Metal 渲染需消耗更多GPU资源和电量，在某些设备上可能会导致性能下降。\n\n- Metal HDR 渲染需要开发者自行编写着色器。无论开发者如何宣称，任何 Metal 渲染器都无法还原 Sunlight 3D 标准渲染器经过设备校准的 HDR 准确性。\n\n- Metal 渲染模式下不支持画中画。\n\n点击“应用”表示我已知晓并认可以上信息。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "- VoidLink 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 VoidLink 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
+            "value" : "- Sunlight 3D 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 Sunlight 3D 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "- VoidLink 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 VoidLink 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
+            "value" : "- Sunlight 3D 標準算繪模式的效能相當出色，不僅與自身的 Metal 算繪器處於同等水準，更大幅超越一些以 vibe coding 打造的所謂 Metal 算繪器。\n\n- Metal 渲染需要消耗更多 GPU 資源與電量，在部分裝置上可能反而會導致效能下降。\n\n- Metal HDR 算繪需要開發者自行編寫著色器。無論開發者如何宣稱，任何 Metal 算繪器都無法還原 Sunlight 3D 標準算繪器經過裝置校準的 HDR 準確性。\n\n- Metal 渲染模式下不支援画中画。\n\n点选「套用」表示我已了解并同意上述说明。"
           }
         }
       }
@@ -18004,25 +18004,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Press the same or a different button for controller navigation during streaming. [Home] button is also available.\n\nNote: if you want to designate the Home button, double tap to pass it through to VoidLink app on iOS 26+.\nAlso, on iOS 27+, go to Settings -> General -> Game Controller -> Home Button Overrides, then add VoidLink to enable direct Home button passthrough."
+            "value" : "Press the same or a different button for controller navigation during streaming. [Home] button is also available.\n\nNote: if you want to designate the Home button, double tap to pass it through to Sunlight 3D app on iOS 26+.\nAlso, on iOS 27+, go to Settings -> General -> Game Controller -> Home Button Overrides, then add Sunlight 3D to enable direct Home button passthrough."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请按下相同或不同的按键，作为串流时的手柄导航键。\n您也可以指定 [Home] 鍵。\n\n注意：iOS 26+ 系统中，需要双击Home键才能将该按键透传至 VoidLink。\n另外，您可以在 iOS 27+ 系统中前往 设置 -> 通用 -> 游戏控制器 -> 主屏幕按钮覆盖，添加 VoidLink 以实现 Home 键直通。"
+            "value" : "请按下相同或不同的按键，作为串流时的手柄导航键。\n您也可以指定 [Home] 鍵。\n\n注意：iOS 26+ 系统中，需要双击Home键才能将该按键透传至 Sunlight 3D。\n另外，您可以在 iOS 27+ 系统中前往 设置 -> 通用 -> 游戏控制器 -> 主屏幕按钮覆盖，添加 Sunlight 3D 以实现 Home 键直通。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "請按下相同或不同的按鍵，作為串流時的手把導覽鍵。 \n您也可以指定 [Home] 鍵。\n\n注意：在 iOS 26 以上系統中，需要雙擊 Home 鍵才能將該按鍵透傳至 VoidLink。\n另外，在 iOS 27 或以上系統中，前往「設定」->「一般」->「遊戲控制器」->「主畫面按鈕覆寫」，然後新增 VoidLink，即可啟用 Home 鍵直通。"
+            "value" : "請按下相同或不同的按鍵，作為串流時的手把導覽鍵。 \n您也可以指定 [Home] 鍵。\n\n注意：在 iOS 26 以上系統中，需要雙擊 Home 鍵才能將該按鍵透傳至 Sunlight 3D。\n另外，在 iOS 27 或以上系統中，前往「設定」->「一般」->「遊戲控制器」->「主畫面按鈕覆寫」，然後新增 Sunlight 3D，即可啟用 Home 鍵直通。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "請按下相同或不同的按鍵，作為串流時的手把導覽鍵。 \n您也可以指定 [Home] 鍵。\n\n注意：在 iOS 26 以上系統中，需要雙擊 Home 鍵才能將該按鍵透傳至 VoidLink。\n另外，在 iOS 27 或以上系統中，前往「設定」->「一般」->「遊戲控制器」->「主畫面按鈕覆寫」，然後新增 VoidLink，即可啟用 Home 鍵直通。"
+            "value" : "請按下相同或不同的按鍵，作為串流時的手把導覽鍵。 \n您也可以指定 [Home] 鍵。\n\n注意：在 iOS 26 以上系統中，需要雙擊 Home 鍵才能將該按鍵透傳至 Sunlight 3D。\n另外，在 iOS 27 或以上系統中，前往「設定」->「一般」->「遊戲控制器」->「主畫面按鈕覆寫」，然後新增 Sunlight 3D，即可啟用 Home 鍵直通。"
           }
         }
       }
@@ -19533,25 +19533,31 @@
         }
       }
     },
-    "VoidLink delivers better performance now!" : {
+    "aboutStreamingDescription" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stream your PC in 2D or 3D."
+          }
+        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink现已具备更强性能！"
+            "value" : "以 2D 或 3D 模式串流您的 PC。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink現已具備更強效能!"
+            "value" : "以 2D 或 3D 模式串流您的 PC。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink現已具備更強效能!"
+            "value" : "以 2D 或 3D 模式串流您的 PC。"
           }
         }
       }
@@ -19654,25 +19660,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Contact True砖家(the Developer)"
+            "value" : "Sunlight 3D"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "开发者: True砖家 (B站)"
+            "value" : "Sunlight 3D"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "needs_review",
-            "value" : "聯絡開發者 True砖家"
+            "value" : "Sunlight 3D"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "聯絡開發者 True砖家"
+            "value" : "Sunlight 3D"
           }
         }
       }
@@ -20231,25 +20237,25 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Turning this option on will disable VoidLink's built-in motion control. If you need the app to convert gyroscope input directly into mouse or controller-stick signals, remember to turn this option off."
+            "value" : "Turning this option on will disable Sunlight 3D's built-in motion control. If you need the app to convert gyroscope input directly into mouse or controller-stick signals, remember to turn this option off."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "打开该选项，将导致 VoidLink 内置的体感控制功能失效。如果您需要在 App 内部直接将陀螺仪转换为鼠标或手柄摇杆信号，请记得关闭该选项。"
+            "value" : "打开该选项，将导致 Sunlight 3D 内置的体感控制功能失效。如果您需要在 App 内部直接将陀螺仪转换为鼠标或手柄摇杆信号，请记得关闭该选项。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟該選項，將導致 VoidLink 內建的體感控制功能失效。如果您需要在 App 內部直接將陀螺儀轉換為滑鼠或手把搖桿訊號，請記得關閉該選項。"
+            "value" : "開啟該選項，將導致 Sunlight 3D 內建的體感控制功能失效。如果您需要在 App 內部直接將陀螺儀轉換為滑鼠或手把搖桿訊號，請記得關閉該選項。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟該選項，將導致 VoidLink 內置的體感控制功能失效。如果您需要在 App 內部直接將陀螺儀轉換為滑鼠或手掣搖桿訊號，請記得關閉該選項。"
+            "value" : "開啟該選項，將導致 Sunlight 3D 內置的體感控制功能失效。如果您需要在 App 內部直接將陀螺儀轉換為滑鼠或手掣搖桿訊號，請記得關閉該選項。"
           }
         }
       }
@@ -20282,9 +20288,6 @@
           }
         }
       }
-    },
-    "闽ICP备17012590号-3A   主办单位：福州创图信息技术有限公司" : {
-
     }
   },
   "version" : "1.1"

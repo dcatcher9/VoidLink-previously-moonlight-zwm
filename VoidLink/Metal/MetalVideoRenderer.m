@@ -14,6 +14,7 @@
 #import <MetalKit/MetalKit.h>
 #import <simd/simd.h>
 #import "ImGuiPlots.h"
+#import "SunlightStereoLayout.h"
 
 #include <Limelight.h>
 
@@ -118,6 +119,10 @@ static void setCurrentColorSpaceName(NSString *name) {
     }
 }
 
+@interface MetalVideoRenderer ()
+- (BOOL)submitFrame:(Frame *)frame toLayer:(CAMetalLayer *)layer;
+@end
+
 @implementation MetalVideoRenderer {
     dispatch_queue_t _sq;
     id<MTLDevice> _device;
@@ -138,6 +143,11 @@ static void setCurrentColorSpaceName(NSString *name) {
     size_t _lastFrameHeight;
     size_t _lastDrawableWidth;
     size_t _lastDrawableHeight;
+    SunlightStreamMode _streamMode;
+    BOOL _stereoOutputEnabled;
+    SunlightStreamMode _lastStreamMode;
+    BOOL _lastStereoOutputEnabled;
+    NSUInteger _videoRegionCount;
     id<MTLBuffer> _CscParamsBuffer;
     id<MTLBuffer> _VideoVertexBuffer;
     
@@ -514,55 +524,102 @@ static void setCurrentColorSpaceName(NSString *name) {
     return YES;
 }
 
-- (void)scaleSource:(CGRect *)src toDest:(CGRect *)dst {
-    int dstH = ceilf((float)dst->size.width * src->size.height / src->size.width);
-    int dstW = ceilf((float)dst->size.height * src->size.width / src->size.height);
-
-    if (dstH > dst->size.height) {
-        dst->origin.x += (dst->size.width - dstW) / 2;
-        dst->size.width = dstW;
-    } else {
-        dst->origin.y += (dst->size.height - dstH) / 2;
-        dst->size.height = dstH;
+- (SunlightStreamMode)streamMode {
+    @synchronized (self) {
+        return _streamMode;
     }
 }
 
-- (void)screenSpace:(CGRect *)src toNormalizedDeviceCoords:(CGRect *)dst withDrawableWidth:(int)viewportWidth drawableHeight:(int)viewportHeight {
-    dst->origin.x = ((float)src->origin.x / (viewportWidth / 2.0f)) - 1.0f;
-    dst->origin.y = ((float)src->origin.y / (viewportHeight / 2.0f)) - 1.0f;
-    dst->size.width = (float)src->size.width / (viewportWidth / 2.0f);
-    dst->size.height = (float)src->size.height / (viewportHeight / 2.0f);
+- (void)setStreamMode:(SunlightStreamMode)streamMode {
+    @synchronized (self) {
+        _streamMode = streamMode;
+    }
 }
 
-- (BOOL)updateVideoRegionSizeForFrame:(Frame *)frame toLayer:(CAMetalLayer *)layer {
-    int drawableWidth = layer.drawableSize.width;
-    int drawableHeight = layer.drawableSize.height;
+- (BOOL)stereoOutputEnabled {
+    @synchronized (self) {
+        return _stereoOutputEnabled;
+    }
+}
+
+- (void)setStereoOutputEnabled:(BOOL)stereoOutputEnabled {
+    @synchronized (self) {
+        _stereoOutputEnabled = stereoOutputEnabled;
+    }
+}
+
+- (BOOL)updateVideoRegionSizeForFrame:(Frame *)frame drawableSize:(CGSize)drawableSize {
+    CGSize sourceSize = CGSizeMake(frame.width, frame.height);
+    if (!isfinite(sourceSize.width) || !isfinite(sourceSize.height) ||
+        !isfinite(drawableSize.width) || !isfinite(drawableSize.height) ||
+        sourceSize.width < 1 || sourceSize.height < 1 ||
+        drawableSize.width < 1 || drawableSize.height < 1) {
+        return NO;
+    }
+    SunlightStreamMode streamMode;
+    BOOL stereoOutput;
+    @synchronized (self) {
+        streamMode = _streamMode;
+        stereoOutput = _stereoOutputEnabled;
+    }
 
     // Check if anything has changed since the last vertex buffer upload
-    if (_VideoVertexBuffer && [frame width] == _lastFrameWidth && [frame height] == _lastFrameHeight && drawableWidth == _lastDrawableWidth &&
-        drawableHeight == _lastDrawableHeight) {
-        // Nothing to do
+    if (_VideoVertexBuffer && sourceSize.width == _lastFrameWidth && sourceSize.height == _lastFrameHeight &&
+        drawableSize.width == _lastDrawableWidth && drawableSize.height == _lastDrawableHeight &&
+        streamMode == _lastStreamMode && stereoOutput == _lastStereoOutputEnabled) {
         return YES;
     }
 
-    // Determine the correct scaled size for the video region
-    CGRect src = CGRectMake(0.0, 0.0, [frame width], [frame height]);
-    CGRect dst = CGRectMake(0.0, 0.0, drawableWidth, drawableHeight);
-    [self scaleSource:&src toDest:&dst];
+    SunlightEyeRegion regions[2];
+    NSUInteger regionCount = 1;
+    BOOL rawStream = streamMode == SunlightStreamModeRawFullSBS || streamMode == SunlightStreamModeRawHalfSBS;
+    if (stereoOutput && rawStream) {
+        if (!SunlightRawPassthroughRegion(sourceSize, drawableSize, &regions[0])) return NO;
+    } else if (stereoOutput && streamMode == SunlightStreamModeHost3D) {
+        if (!SunlightStereoRegions(sourceSize, drawableSize, false, regions)) {
+            return NO;
+        }
+        regionCount = 2;
+    } else if (stereoOutput && streamMode == SunlightStreamMode2D) {
+        if (!SunlightMonoRegions(sourceSize, drawableSize, regions)) return NO;
+        regionCount = 2;
+    } else if (streamMode == SunlightStreamModeHost3D) {
+        if (sourceSize.width < 2) return NO;
+        // Host 3D input retains the logical desktop's touch coordinates. Show
+        // one full-aspect eye on the phone rather than the double-width pack.
+        regions[0].destination = SunlightFitVideo(CGSizeMake(sourceSize.width / 2, sourceSize.height),
+                                                 (CGRect){CGPointZero, drawableSize});
+        CGFloat inset = 0.5 / sourceSize.width;
+        regions[0].texture = CGRectMake(inset, 0, 0.5 - 2 * inset, 1);
+    } else {
+        // Raw SBS previews retain the complete packed desktop for absolute
+        // touch mapping. The glasses route above requires exact passthrough.
+        regions[0].destination = SunlightFitVideo(sourceSize, (CGRect){CGPointZero, drawableSize});
+        regions[0].texture = CGRectMake(0, 0, 1, 1);
+    }
 
-    // Convert screen space to normalized device coordinates
-    CGRect renderRect;
-    [self screenSpace:&dst toNormalizedDeviceCoords:&renderRect withDrawableWidth:drawableWidth drawableHeight:drawableHeight];
-
-    struct Vertex verts[] = {
-        {{renderRect.origin.x, renderRect.origin.y, 0.0f, 1.0f}, {0.0f, 1.0f}},
-        {{renderRect.origin.x, renderRect.origin.y + renderRect.size.height, 0.0f, 1.0f}, {0.0f, 0}},
-        {{renderRect.origin.x + renderRect.size.width, renderRect.origin.y, 0.0f, 1.0f}, {1.0f, 1.0f}},
-        {{renderRect.origin.x + renderRect.size.width, renderRect.origin.y + renderRect.size.height, 0.0f, 1.0f}, {1.0f, 0}},
-    };
+    struct Vertex verts[8];
+    for (NSUInteger eye = 0; eye < regionCount; eye++) {
+        CGRect destination = regions[eye].destination;
+        CGRect texture = regions[eye].texture;
+        if (CGRectIsEmpty(destination)) return NO;
+        float x0 = (float)(2 * CGRectGetMinX(destination) / drawableSize.width - 1);
+        float x1 = (float)(2 * CGRectGetMaxX(destination) / drawableSize.width - 1);
+        float y0 = (float)(1 - 2 * CGRectGetMaxY(destination) / drawableSize.height);
+        float y1 = (float)(1 - 2 * CGRectGetMinY(destination) / drawableSize.height);
+        float u0 = (float)CGRectGetMinX(texture), u1 = (float)CGRectGetMaxX(texture);
+        float v0 = (float)CGRectGetMinY(texture), v1 = (float)CGRectGetMaxY(texture);
+        NSUInteger offset = eye * 4;
+        verts[offset]     = (struct Vertex){{x0, y0, 0, 1}, {u0, v1}};
+        verts[offset + 1] = (struct Vertex){{x0, y1, 0, 1}, {u0, v0}};
+        verts[offset + 2] = (struct Vertex){{x1, y0, 0, 1}, {u1, v1}};
+        verts[offset + 3] = (struct Vertex){{x1, y1, 0, 1}, {u1, v0}};
+    }
 
     MTLResourceOptions bufferOptions = MTLResourceStorageModeShared;
-    id<MTLBuffer> newVideoVertexBuffer = [_device newBufferWithBytes:verts length:sizeof(verts) options:bufferOptions];
+    id<MTLBuffer> newVideoVertexBuffer = [_device newBufferWithBytes:verts
+                                                          length:sizeof(struct Vertex) * regionCount * 4
+                                                         options:bufferOptions];
     if (!newVideoVertexBuffer) {
         Log(LOG_E, @"Failed to create video vertex buffer");
         return NO;
@@ -570,31 +627,41 @@ static void setCurrentColorSpaceName(NSString *name) {
     
     // Replace old buffer with new one
     _VideoVertexBuffer = newVideoVertexBuffer;
+    _videoRegionCount = regionCount;
 
-    _lastFrameWidth = [frame width];
-    _lastFrameHeight = [frame height];
-    _lastDrawableWidth = drawableWidth;
-    _lastDrawableHeight = drawableHeight;
+    _lastFrameWidth = sourceSize.width;
+    _lastFrameHeight = sourceSize.height;
+    _lastDrawableWidth = drawableSize.width;
+    _lastDrawableHeight = drawableSize.height;
+    _lastStreamMode = streamMode;
+    _lastStereoOutputEnabled = stereoOutput;
+    Log(LOG_I, @"Sunlight presentation: mode=%ld, decoded=%.0fx%.0f, output=%.0fx%.0f, stereoOutput=%d, regions=%lu",
+        (long)streamMode, sourceSize.width, sourceSize.height, drawableSize.width, drawableSize.height,
+        stereoOutput, (unsigned long)regionCount);
 
     return YES;
 }
 
 - (void)renderFrame:(Frame *)frame toLayer:(CAMetalLayer *)layer {
+    // waitToRenderTo: handed this call one frame slot. A missing drawable during
+    // window reparenting (or another pre-submission failure) must return it here.
+    // Submitted work returns its slot from the GPU completion handler instead.
+    if (![self submitFrame:frame toLayer:layer]) {
+        dispatch_semaphore_signal(_inFlightSemaphore);
+    }
+}
+
+- (BOOL)submitFrame:(Frame *)frame toLayer:(CAMetalLayer *)layer {
     @autoreleasepool {
         if (self.isStopping) {
             Log(LOG_I, @"[MetalVideoRenderer] isStopping");
-            return;
+            return NO;
         }
 
         // Handle changes to the frame's colorspace from last time we rendered
         BOOL layerDidChange = NO;
         if (![self updateColorSpaceForFrame:frame toLayer:layer layerDidChange:&layerDidChange]) {
-            return;
-        }
-
-        // Handle changes to the video size or drawable size
-        if (![self updateVideoRegionSizeForFrame:frame toLayer:layer]) {
-            return;
+            return NO;
         }
 
         FQLog(LOG_I, @"[%d / %.3f ms] Metal frame rendering", frame.frameNumber, frame.pts);
@@ -602,7 +669,7 @@ static void setCurrentColorSpaceName(NSString *name) {
         CVPixelBufferRef imageBuffer = frame.imageBuffer;
         if (!imageBuffer) {
             Log(LOG_W, @"Frame imageBuffer is NULL, skipping render");
-            return;
+            return NO;
         }
 
         size_t planes = CVPixelBufferGetPlaneCount(imageBuffer);
@@ -615,7 +682,11 @@ static void setCurrentColorSpaceName(NSString *name) {
             planes = 1;  // Treat packed formats as single plane
         }
 
-        assert(planes <= MAX_VIDEO_PLANES);
+        if (planes == 0 || planes > MAX_VIDEO_PLANES) {
+            Log(LOG_E, @"Unsupported video plane count: %zu", planes);
+            return NO;
+        }
+        size_t pipelineIndex = planes - 1;
 
         if (layerDidChange && frame.frameNumber > 1) {
             Log(LOG_I, @"Metal frame changed layer's colorspace and/or pixel format");
@@ -632,17 +703,22 @@ static void setCurrentColorSpaceName(NSString *name) {
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (!drawable) {
             Log(LOG_E, @"Failed to get nextDrawable");
-            return;
+            return NO;
         }
+
+        // Use this drawable's actual pixels, including during screen mode changes.
+        // Raw mismatches are withheld instead of scaling an incorrect eye layout.
+        CGSize drawableSize = CGSizeMake(drawable.texture.width, drawable.texture.height);
+        if (![self updateVideoRegionSizeForFrame:frame drawableSize:drawableSize]) return NO;
 
         // Get the framebuffer pixel format for pipeline creation
         MTLPixelFormat framebufferPixelFormat = drawable.texture.pixelFormat;
 
         // Check if we need to recreate pipeline state due to pixel format change
-        if (!_videoPipelineState[planes] || _videoPipelinePixelFormat[planes] != framebufferPixelFormat) {
-            if (_videoPipelineState[planes]) {
+        if (!_videoPipelineState[pipelineIndex] || _videoPipelinePixelFormat[pipelineIndex] != framebufferPixelFormat) {
+            if (_videoPipelineState[pipelineIndex]) {
                 Log(LOG_I, @"Recreating pipeline state for %zu planes due to pixel format change: %lu -> %lu",
-                    planes, (unsigned long)_videoPipelinePixelFormat[planes], (unsigned long)framebufferPixelFormat);
+                    planes, (unsigned long)_videoPipelinePixelFormat[pipelineIndex], (unsigned long)framebufferPixelFormat);
             }
             MTLRenderPipelineDescriptor *pipelineDesc = [MTLRenderPipelineDescriptor new];
             id<MTLLibrary> defaultLibrary = [_device newDefaultLibrary];
@@ -690,14 +766,14 @@ static void setCurrentColorSpaceName(NSString *name) {
             }
 
             NSError *error = nil;
-            _videoPipelineState[planes] = [_device newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
-            if (!_videoPipelineState[planes]) {
+            _videoPipelineState[pipelineIndex] = [_device newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
+            if (!_videoPipelineState[pipelineIndex]) {
                 Log(LOG_E, @"Failed to create video pipeline state: %@", error);
-                return;
+                return NO;
             }
 
             // Store the pixel format this pipeline state was created for
-            _videoPipelinePixelFormat[planes] = framebufferPixelFormat;
+            _videoPipelinePixelFormat[pipelineIndex] = framebufferPixelFormat;
         }
 
         if (isPackedFormat) {
@@ -706,7 +782,7 @@ static void setCurrentColorSpaceName(NSString *name) {
             CFTypeRef ioSurface = CVPixelBufferGetIOSurface(imageBuffer);
             if (!ioSurface) {
                 Log(LOG_E, @"CVPixelBuffer does not have IOSurface backing - cannot create Metal texture");
-                return;
+                return NO;
             }
 
             CVReturn err = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
@@ -725,10 +801,9 @@ static void setCurrentColorSpaceName(NSString *name) {
                     CVPixelBufferGetWidth(imageBuffer),
                     CVPixelBufferGetHeight(imageBuffer),
                     ioSurface);
-                return;
+                return NO;
             } else {
-                id<MTLTexture> texture = CVMetalTextureGetTexture(_cvMetalTextures[0]);
-                Log(LOG_I, @"DEBUG: Created BGRA texture: format=%lu, width=%zu, height=%zu",
+                FQLog(LOG_I, @"Created BGRA texture: format=%lu, width=%zu, height=%zu",
                     (unsigned long)MTLPixelFormatBGRA8Unorm,
                     CVPixelBufferGetWidth(imageBuffer),
                     CVPixelBufferGetHeight(imageBuffer));
@@ -755,8 +830,8 @@ static void setCurrentColorSpaceName(NSString *name) {
                         break;
 
                     default:
-                        Log(LOG_E, @"Unknown pixel format: %@", CVPixelBufferGetPixelFormatType(imageBuffer));
-                        return;
+                        Log(LOG_E, @"Unknown pixel format: 0x%08X", (unsigned int)CVPixelBufferGetPixelFormatType(imageBuffer));
+                        return NO;
                 }
 
                 CVReturn err = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
@@ -770,7 +845,7 @@ static void setCurrentColorSpaceName(NSString *name) {
                                                                          &_cvMetalTextures[i]);
                 if (err != kCVReturnSuccess) {
                     Log(LOG_E, @"CVMetalTextureCacheCreateTextureFromImage() failed: %d", err);
-                    return;
+                    return NO;
                 }
             }
         }
@@ -779,8 +854,12 @@ static void setCurrentColorSpaceName(NSString *name) {
 
         id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
         id<MTLRenderCommandEncoder> renderEncoder = [commandBuffer renderCommandEncoderWithDescriptor:_renderPassDescriptor];
+        if (!commandBuffer || !renderEncoder) {
+            Log(LOG_E, @"Failed to create Metal command buffer or render encoder");
+            return NO;
+        }
 
-        [renderEncoder setRenderPipelineState:_videoPipelineState[planes]];
+        [renderEncoder setRenderPipelineState:_videoPipelineState[pipelineIndex]];
 
         if (isPackedFormat) {
             // For packed formats, we only have one texture
@@ -805,7 +884,9 @@ static void setCurrentColorSpaceName(NSString *name) {
             [renderEncoder setFragmentBytes:&_currentEDRHeadroom length:sizeof(float) atIndex:1];
         }
 #endif
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        for (NSUInteger eye = 0; eye < _videoRegionCount; eye++) {
+            [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:eye * 4 vertexCount:4];
+        }
         [renderEncoder endEncoding];
 
         __block MetalVideoRenderer *strongSelf = self;
@@ -827,7 +908,7 @@ static void setCurrentColorSpaceName(NSString *name) {
 
             const CFTimeInterval GPUTime = cb.GPUEndTime - cb.GPUStartTime;
             const double alpha = 0.25f;
-            self->_averageGPUTime = (GPUTime * alpha) + (self->_averageGPUTime * (1.0 - alpha));
+            self.averageGPUTime = (GPUTime * alpha) + (self.averageGPUTime * (1.0 - alpha));
 
             // Free textures after completion of rendering
             for (size_t i = 0; i < texturesToClean; i++) {
@@ -849,6 +930,7 @@ static void setCurrentColorSpaceName(NSString *name) {
 
         [commandBuffer commit];
         [commandBuffer waitUntilCompleted];
+        return YES;
     }
 }
 
@@ -869,36 +951,12 @@ static void setCurrentColorSpaceName(NSString *name) {
 }
 
 - (void)shutdown {
-    if (!self.isStopping) {
-        self.isStopping = YES;
-        Log(LOG_I, @"[MetalVideoRenderer] shutdown");
-
-        // Ensure no rendering is in flight
-        for (NSUInteger i = 0; i < MaxFramesInFlight; i++) {
-            dispatch_semaphore_signal(_inFlightSemaphore);
-        }
-        
-        // Clean up any pending Metal textures
-        for (int i = 0; i < MAX_VIDEO_PLANES; i++) {
-            if (_cvMetalTextures[i]) {
-                CFRelease(_cvMetalTextures[i]);
-                _cvMetalTextures[i] = NULL;
-            }
-        }
-        
-        // Flush texture cache to free memory
-        if (_textureCache) {
-            CVMetalTextureCacheFlush(_textureCache, 0);
-        }
-        
-        // Clear pipeline states
-        for (int i = 0; i < MAX_VIDEO_PLANES; i++) {
-            if (_videoPipelineState[i]) {
-                _videoPipelineState[i] = nil;
-            }
-            _videoPipelinePixelFormat[i] = MTLPixelFormatInvalid;
-        }
-    }
+    self.isStopping = YES;
+    // Shutdown runs on main while a frame can still be submitting or completing.
+    // Never release the worker's texture refs or pipelines here. The active
+    // wait/render pair and GPU callbacks retain this renderer until they finish;
+    // dealloc then releases its resources without racing those users.
+    Log(LOG_I, @"[MetalVideoRenderer] shutdown requested");
 }
 
 /// Responds to the drawable's size or orientation changes.

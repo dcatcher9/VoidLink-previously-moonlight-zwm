@@ -13,6 +13,7 @@
 #import "Frame.h"
 #import "Plot.h"
 #import "TemporarySettings.h"
+#import "StreamConfiguration.h"
 
 @interface MetalVideoRenderer : NSObject
 
@@ -24,6 +25,8 @@
 @property (atomic) BOOL isStopping;
 @property (nonatomic) BOOL hdrEnabled;
 @property (nonatomic, readonly, nonnull) dispatch_semaphore_t inFlightSemaphore;
+@property (atomic) SunlightStreamMode streamMode;
+@property (atomic) BOOL stereoOutputEnabled;
 
 - (instancetype _Nonnull )initWithMetalDevice:(id<MTLDevice>_Nonnull)device drawablePixelFormat:(MTLPixelFormat)drawablePixelFormat settings:(TemporarySettings* _Nonnull )currentSettings;
 

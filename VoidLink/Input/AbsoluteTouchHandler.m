@@ -13,6 +13,7 @@
 #import "VoidLink-Swift.h"
 
 #include <Limelight.h>
+#import "SunlightInputDispatch.h"
 
 // How long the fingers must be stationary to start a right click
 #define LONG_PRESS_ACTIVATION_DELAY 0.650f
@@ -49,10 +50,6 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     NSTimeInterval leftClickTimeThreshold;
     
     // upper screen edge check
-    bool touchPointSpawnedAtUpperScreenEdge;
-    CGFloat slideGestureVerticalThreshold;
-    CGFloat screenWidthWithThreshold;
-    CGFloat _edgeTolerance;
     
     bool _delayMouseLeftClick;
     NSTimeInterval leftClickDelay;
@@ -77,10 +74,6 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     leftClickTimeThreshold = 0.1;
     
     // upper screen check
-    _edgeTolerance = settings.edgeSlidingSensitivity.floatValue;
-    slideGestureVerticalThreshold = CGRectGetHeight([[UIScreen mainScreen] bounds]) * 0.4;
-    screenWidthWithThreshold = CGRectGetWidth([[UIScreen mainScreen] bounds]) - _edgeTolerance;
-    self->touchPointSpawnedAtUpperScreenEdge = false;
         
     leftClickDelay = ((CGFloat)settings.leftClickDelayMs.intValue)/1000;
     
@@ -93,13 +86,13 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     
     if([self touchDidntMoveOnScreen:movingTouchLocation]){
         if(_delayMouseLeftClick){
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-            if(mouseButtonForCursorMove!=BUTTON_LEFT) LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove);
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
+            if(mouseButtonForCursorMove!=BUTTON_LEFT) SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove); });
         }
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT); });
         dispatch_time_t delayShort = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC));
-        dispatch_after(delayShort, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+        SunlightDispatchHostInputAfter(streamView, delayShort, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT); });
             self->rightButtonClicked = true;
         });
     }
@@ -115,13 +108,7 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
         return;
     }
     
-    CGPoint initialPoint = [[touches anyObject] locationInView:streamView];
-    if(initialPoint.y < slideGestureVerticalThreshold && (initialPoint.x < _edgeTolerance || initialPoint.x > screenWidthWithThreshold)) {
-        self->touchPointSpawnedAtUpperScreenEdge = true;
-        return; // we're done here. this touch event will not be sent to the remote PC.
-    }
     
-    touchPointSpawnedAtUpperScreenEdge = false; // reset this flag immediately if we get a touch event passing the check above, this fixes irresponsive touch after closing the command tool menu.
 
     // Ignore touch down events with more than one finger
     /*
@@ -143,7 +130,7 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     
     // Press the left button down
     if(!_delayMouseLeftClick){
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); //deprecated
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); }); //deprecated
     }
     
     // Start the long press timer
@@ -162,17 +149,16 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
 
 - (void)pauseLeftButtonDrag{
     if(dragButtonDown){
-        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
         dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC));
-        dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouseButtonForCursorMove);
+        SunlightDispatchHostInputAfter(streamView, delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouseButtonForCursorMove); });
         });
     }
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
     
-    if(touchPointSpawnedAtUpperScreenEdge) return; // we're done here. this touch event will not be sent to the remote PC.
     
     // Ignore touch move events with more than one finger
     /*
@@ -184,7 +170,7 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     currentTouchesCount = currentTouches.count;
     
     if(currentTouchesCount == 2){
-        if(mouseButtonForCursorMove!=BUTTON_LEFT) LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove);
+        if(mouseButtonForCursorMove!=BUTTON_LEFT) SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove); });
         if(passthroughGestures) [TouchPadGestureHandler handleGestureIn:streamView with:event];
     }
      
@@ -203,7 +189,7 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
         NSTimeInterval dragDelay = mouseButtonForCursorMove == BUTTON_LEFT ? leftClickTimeThreshold : 0;
         
         if(_delayMouseLeftClick && (CACurrentMediaTime()-touchBeganTimeStamp>dragDelay) && !dragButtonDown){
-            LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouseButtonForCursorMove);
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouseButtonForCursorMove); });
             dragButtonDown = true;
         }
     }
@@ -215,9 +201,8 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
     [longPressTimer invalidate];
     longPressTimer = nil;
     
-    if(TouchPadGestureHandler.ctrlDown) LiSendKeyboardEvent(CommandManager.keyboardButtonMappings[@"CTRL"].shortValue,KEY_ACTION_UP,0);
+    if(TouchPadGestureHandler.ctrlDown) SunlightHostInput(streamView, ^int{ return LiSendKeyboardEvent(CommandManager.keyboardButtonMappings[@"CTRL"].shortValue,KEY_ACTION_UP,0); });
     
-    if(touchPointSpawnedAtUpperScreenEdge) return; // we're done here. this touch event will not be sent to the remote PC.
     
     if(multiTouchesDetected) {
         if([UITouchUtil touchesIn:streamView from:event].count == touches.count) multiTouchesDetected = false;
@@ -242,17 +227,17 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
                 if([self touchDidntMoveOnScreen:touchEndLocation] && !rightButtonClicked) [self sendShortMouseLeftButtonClickEvent];
             }
             else if(!rightButtonClicked){
-                    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-                    if(mouseButtonForCursorMove!=BUTTON_LEFT) LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove);
-                    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+                    SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
+                    if(mouseButtonForCursorMove!=BUTTON_LEFT) SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove); });
+                    SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT); });
             }
         }
         else{
             // Left button up on finger up
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
 
             // Raise right button too in case we triggered a long press gesture
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT); });
         }
                 
         lastTouchUp = [touches anyObject];
@@ -263,18 +248,17 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    // Treat this as a normal touchesEnded event
-    [self touchesEnded:touches withEvent:event];
+    [self cancelHostTouches];
 }
 
 - (void)sendShortMouseLeftButtonClickEvent{
     dispatch_time_t delayShort = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(leftClickDelay * NSEC_PER_SEC));
     dispatch_time_t delayLong = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC));
-    dispatch_after(delayShort, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
-        dispatch_after(delayLong, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+    SunlightDispatchHostInputAfter(streamView, delayShort, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); });
+        SunlightDispatchHostInputAfter(streamView, delayLong, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT); });
         });
     });
 }
@@ -294,6 +278,21 @@ static int mouseButtonForCursorMove = BUTTON_LEFT;
 
 + (void)setMouseButtonForCursorMove:(int)button {
     mouseButtonForCursorMove = button;
+}
+
+- (void)cancelHostTouches {
+    [longPressTimer invalidate];
+    longPressTimer = nil;
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+    if (mouseButtonForCursorMove != BUTTON_LEFT && mouseButtonForCursorMove != BUTTON_RIGHT)
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouseButtonForCursorMove);
+    capturedTouch = nil;
+    lastTouchDown = nil;
+    lastTouchUp = nil;
+    multiTouchesDetected = false;
+    dragButtonDown = false;
+    rightButtonClicked = false;
 }
 
 @end

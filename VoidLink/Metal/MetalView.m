@@ -15,6 +15,10 @@
 @implementation MetalView {
     // The secondary thread containing the render loop.
     NSThread *_renderThread;
+    NSCondition *_renderCondition;
+    BOOL _hasWindow;
+    BOOL _renderingPaused;
+    BOOL _shutdownRequested;
 }
 
 #pragma mark - Initialization and Setup.
@@ -36,14 +40,35 @@
 }
 
 - (void)initCommon {
+    _renderCondition = [[NSCondition alloc] init];
     _metalLayer = (CAMetalLayer *)self.layer;
     self.layer.delegate = self;
 }
 
+- (BOOL)renderingPaused {
+    [_renderCondition lock];
+    BOOL paused = _renderingPaused;
+    [_renderCondition unlock];
+    return paused;
+}
+
+- (void)setRenderingPaused:(BOOL)renderingPaused {
+    [_renderCondition lock];
+    _renderingPaused = renderingPaused;
+    [_renderCondition broadcast];
+    [_renderCondition unlock];
+}
+
 - (void)shutdown {
-    if (_renderThread) {
+    [_renderCondition lock];
+    _shutdownRequested = YES;
+    NSThread *renderThread = _renderThread;
+    [renderThread cancel];
+    [_renderCondition broadcast];
+    [_renderCondition unlock];
+
+    if (renderThread) {
         Log(LOG_I, @"[MetalView] sending renderThread a cancel message");
-        [_renderThread cancel];
         Log(LOG_I, @"[MetalView] waiting on renderThread to finish");
         // Bounded wait only: shutdown typically runs on the main thread, and the render
         // thread may be blocked in a dispatch_sync onto the main queue (layer colorspace
@@ -51,10 +76,10 @@
         // exits on its own once the main queue is serviced again (it retains the view
         // via its block, so this is safe).
         CFTimeInterval deadline = CACurrentMediaTime() + 1.0;
-        while (!_renderThread.isFinished && CACurrentMediaTime() < deadline) {
+        while (!renderThread.isFinished && CACurrentMediaTime() < deadline) {
             usleep(100);
         }
-        if (_renderThread.isFinished) {
+        if (renderThread.isFinished) {
             Log(LOG_I, @"[MetalView] renderThread has finished");
         } else {
             Log(LOG_W, @"[MetalView] renderThread still busy after 1s, letting it exit asynchronously");
@@ -68,37 +93,19 @@
 }
 
 - (void)didMoveToWindow {
+    [super didMoveToWindow];
     [self movedToWindow];
 }
 
 - (void)movedToWindow {
     if (!self.window) {
-        Log(LOG_I, @"[MetalView] movedToWindow(nil): shutting down...");
-        [self shutdown];
+        // Reparenting briefly removes the view from its window. Keep the same
+        // renderer and consumer thread; the next window resumes that thread.
+        [_renderCondition lock];
+        _hasWindow = NO;
+        [_renderCondition unlock];
         return;
     }
-
-    // Never run two render loops at once (the view can move between windows,
-    // e.g. external display or re-parenting)
-    if (_renderThread) {
-        Log(LOG_W, @"[MetalView] movedToWindow with a live renderThread, restarting it");
-        [self shutdown];
-    }
-
-    // Render on a new thread
-    _renderThread = [[NSThread alloc] initWithBlock:^{
-        while (![NSThread currentThread].isCancelled) {
-            @autoreleasepool {
-                [self.delegate waitToRenderTo:self.metalLayer];
-                [self.delegate renderTo:self.metalLayer];
-            }
-        }
-        Log(LOG_I, @"[MetalView] renderThread is exiting");
-    }];
-    _renderThread.name = @"MetalVideoRenderer";
-    _renderThread.qualityOfService = NSQualityOfServiceUserInteractive;
-    [_renderThread start];
-    Log(LOG_I, @"[MetalView] started renderThread %@", _renderThread);
 
     // Perform any actions that need to know the size and scale of the drawable. When UIKit calls
     // didMoveToWindow after the view initialization, this is the first opportunity to notify
@@ -112,6 +119,45 @@
     defaultDrawableSize.height *= self.layer.contentsScale;
     [self.delegate drawableResize:defaultDrawableSize];
 #endif
+
+    [_renderCondition lock];
+    _hasWindow = YES;
+    if (!_shutdownRequested && !_renderThread) {
+        // One consumer per view lifetime. A bounded shutdown wait must never
+        // allow a replacement loop to race an older loop during window moves.
+        _renderThread = [[NSThread alloc] initWithBlock:^{
+            while (YES) {
+                [self->_renderCondition lock];
+                while ((!self->_hasWindow || self->_renderingPaused) && !self->_shutdownRequested) {
+                    [self->_renderCondition wait];
+                }
+                BOOL shouldStop = self->_shutdownRequested;
+                [self->_renderCondition unlock];
+                if (shouldStop) {
+                    break;
+                }
+
+                @autoreleasepool {
+                    // Keep the same delegate for the wait/render pair so that
+                    // an acquired frame slot is handled by its owning controller.
+                    id<MetalViewDelegate> delegate = self.delegate;
+                    if (delegate) {
+                        [delegate waitToRenderTo:self.metalLayer];
+                        [delegate renderTo:self.metalLayer];
+                    } else {
+                        usleep(10000);
+                    }
+                }
+            }
+            Log(LOG_I, @"[MetalView] renderThread is exiting");
+        }];
+        _renderThread.name = @"MetalVideoRenderer";
+        _renderThread.qualityOfService = NSQualityOfServiceUserInteractive;
+        [_renderThread start];
+        Log(LOG_I, @"[MetalView] started renderThread %@", _renderThread);
+    }
+    [_renderCondition signal];
+    [_renderCondition unlock];
 }
 
 #pragma mark - Resizing
@@ -145,7 +191,7 @@
     newSize.width *= scaleFactor;
     newSize.height *= scaleFactor;
 
-    if (newSize.width <= 0 || newSize.width <= 0) {
+    if (newSize.width <= 0 || newSize.height <= 0) {
         return;
     }
 

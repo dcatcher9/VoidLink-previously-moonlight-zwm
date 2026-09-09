@@ -28,6 +28,8 @@
 // reference here creates a retain cycle that leaks the whole Metal stack.
 @property (nonatomic, weak, nullable) id<MetalViewDelegate> delegate;
 @property (nonatomic) float framerate;
+// Suspends the consumer between frame pairs without replacing its worker.
+@property (nonatomic) BOOL renderingPaused;
 
 - (void)initCommon;
 - (void)shutdown;

@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (id)initWithView:(StreamView*)view andSettings:(TemporarySettings*)settings;
 
+- (void)cancelHostTouches;
+
 @end
 
 NS_ASSUME_NONNULL_END

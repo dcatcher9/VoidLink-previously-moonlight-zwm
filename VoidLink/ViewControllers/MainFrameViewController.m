@@ -22,6 +22,7 @@
 #import "AppListResponse.h"
 #import "ServerInfoResponse.h"
 #import "StreamFrameViewController.h"
+#import "SceneDelegate.h"
 #import "LoadingFrameViewController.h"
 #import "TemporaryApp.h"
 #import "IdManager.h"
@@ -34,6 +35,15 @@
 
 #if !TARGET_OS_TV
 #import "SettingsViewController.h"
+#import "ExternalDisplayCoordinator.h"
+#import "SunlightGlassesModePolicy.h"
+#import "SunlightStreamQualityProfile.h"
+#import "SunlightNativeResolution.h"
+#import "SunlightSharedSettings.h"
+#import "SunlightMachineControlsSettings.h"
+#import "SunlightUITheme.h"
+#import "SunlightMoonlightIcons.h"
+#import "SunlightSharedSettingsViewController.h"
 #else
 #import <sys/utsname.h>
 #endif
@@ -41,6 +51,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <Limelight.h>
+#include <limits.h>
 
 
 @interface MainFrameViewController() <AppCallback, HostCardActionDelegate, AppViewUpdateLoopDelegate, ControllerNavigatorRadialMenuDelegate, ControllerUtilDelegate>
@@ -54,6 +65,7 @@
     UIBarButtonItem* _addHostButton;
     UIBarButtonItem* _helpButton;
     UIBarButtonItem* _upButton;
+    UIBarButtonItem* _machineSettingsButton;
 
     UILabel* hostViewTitleLabel;
     //CGFloat recordedScreenWidth;
@@ -65,6 +77,7 @@
     DiscoveryManager* _discMan;
     AppAssetManager* _appManager;
     StreamConfiguration* _streamConfig;
+    NSUInteger _streamLaunchGeneration;
     UIAlertController* _pairAlert;
     LoadingFrameViewController* _loadingFrame;
     FrontViewPosition currentPosition;
@@ -354,7 +367,7 @@ static NSMutableSet* hostList;
     self.hostCollectionVC.view.hidden = NO;
     self.collectionView.hidden = YES;
     [self updateTitle];
-    self.navigationItem.rightBarButtonItems = @[_helpButton, _addHostButton];
+    [self updateBrowserNavigation];
     self.revealViewController.mainFrameIsInHostView = true;  // to allow orientation change only in app view, tell top view controller the mainframe is not in host view
     
     if (@available(iOS 13.0, *)){
@@ -404,7 +417,7 @@ static NSMutableSet* hostList;
     // [self.collectionView setContentOffset:CGPointZero animated:NO];
     
     [self attachWaterMark];
-    self.navigationItem.rightBarButtonItems = @[_upButton];
+    [self updateBrowserNavigation];
     self.revealViewController.mainFrameIsInHostView = false;  
     // [self disableNavigation];
     [self updateTitle];
@@ -815,17 +828,33 @@ static NSMutableSet* hostList;
 }
 
 - (void) prepareToStreamApp:(TemporaryApp *)app {
+    // Each new session starts in 2D. 3D is an explicit in-stream choice after
+    // the glasses report an SBS output mode, not a global launch preference.
+    [self prepareToStreamApp:app mode:SunlightStreamMode2D];
+}
+
+- (void)prepareToStreamApp:(TemporaryApp *)app mode:(SunlightStreamMode)mode {
+    _streamLaunchGeneration++;
     
-    self.navigationController.navigationBar.hidden = true;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        self.navigationController.navigationBar.hidden = false;
-    });
+    // The streaming screen supplies its own controls. The browsing screen
+    // restores navigation in viewDidAppear when the stream ends.
+    [self.navigationController setNavigationBarHidden:YES animated:NO];
     
     launchedApp = app;
     [self updateResolutionAccordingly];
     self.revealViewController.isStreaming = true; // tell the revealViewController streaming is started.
     _streamConfig = [[StreamConfiguration alloc] init];
+#if !TARGET_OS_TV
+    if (@available(iOS 13.0, *)) {
+        NSNumber *outputMode = [[[DataManager alloc] init] getSettings].externalDisplayMode;
+        _streamConfig.glassesOutputEnabled = outputMode == nil || outputMode.integerValue == 1;
+    }
+    _streamConfig.streamMode = SunlightAllowedStreamMode(mode, _streamConfig.glassesOutputEnabled,
+        [ExternalDisplayCoordinator sharedCoordinator].displayMode);
+#endif
     _streamConfig.host = app.host.activeAddress;
+    _streamConfig.hostUUID = app.host.uuid;
+    _streamConfig.hostName = app.host.name;
     _streamConfig.httpsPort = app.host.httpsPort;
     _streamConfig.appID = app.id;
     _streamConfig.appName = app.name;
@@ -835,16 +864,80 @@ static NSMutableSet* hostList;
 }
 
 - (void) reloadStreamConfig {
+    // Once handed to a manager, these are the negotiated transport fields.
+    // Live input/UI changes must not silently rewrite mode, size, or codecs.
+    if (streamFrameViewController.streamConfig == _streamConfig && streamFrameViewController.streamMan) return;
     DataManager* dataMan = [[DataManager alloc] init];
     TemporarySettings* streamSettings = [dataMan getSettings];
+#if !TARGET_OS_TV
+    ExternalDisplayCoordinator *display = [ExternalDisplayCoordinator sharedCoordinator];
+    // Recheck at configuration time too: the hardware can change while an old
+    // connection is stopping or a reconnect's loading sheet is being dismissed.
+    SunlightStreamMode allowedMode = SunlightAllowedStreamMode(_streamConfig.streamMode,
+        _streamConfig.glassesOutputEnabled, display.displayMode);
+    if (_streamConfig.streamMode != allowedMode) {
+        _streamConfig.streamMode = allowedMode;
+        _streamConfig.logicalWidth = 0;
+        _streamConfig.logicalHeight = 0;
+    }
+    SunlightStreamQualityProfile *fallback = [[SunlightStreamQualityProfile alloc] init];
+    fallback.width = streamSettings.width.intValue;
+    fallback.height = streamSettings.height.intValue;
+    fallback.frameRate = streamSettings.framerate.intValue;
+    fallback.bitRate = streamSettings.bitrate.intValue;
+    fallback.usesNativeResolution = !_streamConfig.isRawSbsStream && streamSettings.resolutionSelected.integerValue == 4;
+    SunlightStreamQualityProfile *quality = [SunlightStreamQualityProfile profileForMode:_streamConfig.streamMode
+        hostUUID:_streamConfig.hostUUID appID:_streamConfig.appID defaults:NSUserDefaults.standardUserDefaults fallback:fallback];
+    CGSize native = SunlightNativeLandscapeSize();
+    [quality resolveNativeWidth:(int)native.width height:(int)native.height];
+    // Each mode owns its quality; browsing another tab must not overwrite it.
+    // These are effective session values, not writes to the shared sidebar.
+    streamSettings.width = @(quality.width);
+    streamSettings.height = @(quality.height);
+    streamSettings.framerate = @(quality.frameRate);
+    streamSettings.bitrate = @(quality.bitRate);
+    SunlightSharedSettings *globalShared = [[SunlightSharedSettings alloc] init];
+    globalShared.preferredCodec = streamSettings.preferredCodec;
+    globalShared.framePacingMode = streamSettings.framePacingMode.integerValue;
+    globalShared.audioConfig = streamSettings.audioConfig.integerValue;
+    globalShared.enableHdr = streamSettings.enableHdr;
+    globalShared.fullColorRange = streamSettings.fullColorRange;
+    globalShared.playAudioOnPC = streamSettings.playAudioOnPC;
+    SunlightSharedSettings *shared = [SunlightSharedSettings settingsForHostUUID:_streamConfig.hostUUID
+        defaults:NSUserDefaults.standardUserDefaults globalDefaults:globalShared];
+    streamSettings.preferredCodec = shared.preferredCodec;
+    streamSettings.framePacingMode = @(shared.framePacingMode);
+    streamSettings.audioConfig = @(shared.audioConfig);
+    streamSettings.enableHdr = shared.enableHdr;
+    streamSettings.fullColorRange = shared.fullColorRange;
+    streamSettings.playAudioOnPC = shared.playAudioOnPC;
+    SunlightMachineControlsSettings *machine = [SunlightMachineControlsSettings settingsForHostUUID:_streamConfig.hostUUID
+        defaults:NSUserDefaults.standardUserDefaults globalDefaults:[self globalMachineControls]];
+    _streamConfig.machineControls = machine;
+    streamSettings.localVolume = @(machine.localVolume);
+    streamSettings.statsOverlayLevel = @(machine.statsOverlayLevel);
+    streamSettings.statsOverlayEnabled = machine.statsOverlayEnabled;
+#endif
+    if (_streamConfig.requiresMetalPresentation) {
+        // Effective session settings; the user's normal 2D preferences are retained.
+        streamSettings.enableHdr = NO;
+        streamSettings.enablePIP = NO;
+        streamSettings.sdrPerformanceWorkaround = NO;
+        streamSettings.framePacingMode = @(FramePacingModeQueue);
+        streamSettings.framerate = @(MIN(60, streamSettings.framerate.intValue));
+        // Both SBS paths use the host's 4:2:0 codec capabilities for size negotiation.
+        streamSettings.enableYUV444 = NO;
+    }
     [VideoDecoderRenderer setFrameInterpolationEnabled: streamSettings.framePacingMode.intValue == FramePacingModeInterpolation];
     _streamConfig.frameRate = [streamSettings.framerate intValue];
     if (@available(iOS 10.3, *)) {
-        UIWindow *window = UIApplication.sharedApplication.windows.firstObject;
-        NSInteger maximumFramesPerSecond = window.screen.maximumFramesPerSecond;
-        if(UIScreen.screens.count > 1 && streamSettings.externalDisplayMode.intValue == 1){ //AirPlaying
-            maximumFramesPerSecond = UIScreen.screens.lastObject.maximumFramesPerSecond;
+        UIScreen *screen = self.view.window.screen ?: UIScreen.mainScreen;
+        if (@available(iOS 13.0, *)) {
+            if (streamSettings.externalDisplayMode.intValue == 1 && [SceneDelegate externalDisplayScreen]) {
+                screen = [SceneDelegate externalDisplayScreen];
+            }
         }
+        NSInteger maximumFramesPerSecond = screen.maximumFramesPerSecond;
         // Don't stream more FPS than the display can show
         if (_streamConfig.frameRate > maximumFramesPerSecond) {
             _streamConfig.frameRate = (int)maximumFramesPerSecond;
@@ -852,8 +945,26 @@ static NSMutableSet* hostList;
         }
     }
     
-    _streamConfig.height = streamSettings.height.intValue;
-    _streamConfig.width = streamSettings.width.intValue;
+#if !TARGET_OS_TV
+    if (_streamConfig.isRawSbsStream) {
+        // Raw is already a complete packed picture. Request the glasses'
+        // complete canvas without doubling or changing the saved 2D quality.
+        CGSize pixels = display.outputPixelSize;
+        _streamConfig.width = _streamConfig.logicalWidth = (int)pixels.width;
+        _streamConfig.height = _streamConfig.logicalHeight = (int)pixels.height;
+    } else
+#endif
+    if (!_streamConfig.isStereoStream || _streamConfig.logicalWidth == 0) {
+        _streamConfig.height = streamSettings.height.intValue;
+        _streamConfig.width = streamSettings.width.intValue;
+        if ([_streamConfig useCompatibleHost3DResolution]) {
+            Log(LOG_I, @"Host 3D source adjusted from %dx%d to %dx%d for model compatibility",
+                streamSettings.width.intValue, streamSettings.height.intValue,
+                _streamConfig.width, _streamConfig.height);
+        }
+        _streamConfig.logicalWidth = _streamConfig.width;
+        _streamConfig.logicalHeight = _streamConfig.height;
+    }
     
     NSLog(@"saveSettings.width %d, %d", _streamConfig.width, _streamConfig.height);
 #if TARGET_OS_TV
@@ -879,7 +990,7 @@ static NSMutableSet* hostList;
     _streamConfig.fullColorRange = streamSettings.fullColorRange;
     _streamConfig.enableHdr = streamSettings.enableHdr;
     _streamConfig.sdrPerformanceWorkaround = streamSettings.sdrPerformanceWorkaround;
-    _streamConfig.asyncNativeTouchPriority = streamSettings.asyncNativeTouchPriority; // new streamConfig segment
+    _streamConfig.asyncNativeTouchPriority = streamSettings.asyncNativeTouchPriority.boolValue;
     _streamConfig.gyroMode = [streamSettings.gyroMode intValue];
     _streamConfig.emulatedControllerType = streamSettings.emulatedControllerType.intValue;
     _streamConfig.hapticEngine = streamSettings.hapticEngine.intValue;
@@ -913,6 +1024,8 @@ static NSMutableSet* hostList;
     
     Connection.useSystemAudioEngine = streamSettings.audioConfig.intValue == 2;
     
+    // Reconfiguration must not retain a codec that the user has disabled.
+    _streamConfig.supportedVideoFormats = 0;
     bool sdrPerformanceWorkaround = false;
     switch (streamSettings.preferredCodec) {
         case CODEC_PREF_AV1:
@@ -982,6 +1095,7 @@ static NSMutableSet* hostList;
         }
     }
 #endif
+    _streamConfig.presentationSettings = streamSettings;
 }
 
 - (NSInteger)requestForBitrate:(NSInteger)bitrateKbps{
@@ -993,7 +1107,11 @@ static NSMutableSet* hostList;
     return bitrateResponse.statusCode;
 }
 
-- (HttpResponse* )requestToQuitApp:(TemporaryApp* )app{
+- (HttpResponse *)requestToQuitApp:(TemporaryApp *)app {
+    return [self requestToQuitApp:app expectedHostSessionId:nil];
+}
+
+- (HttpResponse *)requestToQuitApp:(TemporaryApp *)app expectedHostSessionId:(NSString *)expectedSession {
     HttpResponse* quitResponse = [[HttpResponse alloc] init];
     TemporaryHost* host = app.host;
     NSString* targetAppId = [app.id copy];
@@ -1059,6 +1177,12 @@ static NSMutableSet* hostList;
             hostSessionId = [NSString stringWithFormat:@"%llu", (unsigned long long)sessionId];
         }
 
+        if (expectedSession.length && ![hostSessionId isEqualToString:expectedSession]) {
+            quitResponse.statusCode = 409;
+            quitResponse.statusMessage = @"The streaming session changed. No quit request was sent.";
+            return quitResponse;
+        }
+
         Log(LOG_I, @"Quitting app %@ using %@ session identity", targetAppId, hostSessionId ? @"host-scoped" : @"legacy");
         HttpRequest* quitRequest = [HttpRequest requestForResponse:quitResponse
                                                    withUrlRequest:[hMan newQuitAppRequestWithHostSessionId:hostSessionId]];
@@ -1110,12 +1234,16 @@ static NSMutableSet* hostList;
     });
 }
 
-- (void)quitApp:(TemporaryApp* )app{
+- (void)quitApp:(TemporaryApp *)app {
+    [self quitApp:app expectedHostSessionId:nil];
+}
+
+- (void)quitApp:(TemporaryApp *)app expectedHostSessionId:(NSString *)expectedSession {
     if(!app) return;
     if(![PublicUtils hasNoPresentedVC:self]) return;
     [self showLoadingFrame: ^{
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            HttpResponse* quitResponse = [self requestToQuitApp:app];
+            HttpResponse* quitResponse = [self requestToQuitApp:app expectedHostSessionId:expectedSession];
             // If it fails, display an error and stop the current operation
             if (quitResponse.statusCode != 200) {
                 [self showQuitFailure:quitResponse forHost:app.host];
@@ -1125,8 +1253,24 @@ static NSMutableSet* hostList;
     }];
 }
 
-- (void)quitLaunchedApp {
-    [self quitApp:launchedApp];
+- (void)disconnectAndQuitStreamFromController:(StreamFrameViewController *)controller {
+    NSAssert(NSThread.isMainThread, @"Stream actions belong to main");
+    if (controller != streamFrameViewController || self.navigationController.topViewController != controller ||
+        ![launchedApp.id isEqualToString:controller.streamConfig.appID] ||
+        ![launchedApp.host.uuid isEqualToString:controller.streamConfig.hostUUID]) return;
+    TemporaryApp *app = launchedApp;
+    NSString *session = [controller.streamConfig.hostSessionId copy];
+    StreamManager *retiringManager = controller.streamMan;
+    NSUInteger generation = ++_streamLaunchGeneration;
+    [controller returnToMainFrame];
+    __weak typeof(self) weakSelf = self;
+    [retiringManager stopStreamWithCompletion:^{
+        typeof(self) self = weakSelf;
+        // Never resolve a later launchedApp or quit after another launch wins.
+        if (!self || generation != self->_streamLaunchGeneration ||
+            self.navigationController.topViewController != self) return;
+        [self quitApp:app expectedHostSessionId:session];
+    }];
 }
 
 - (void)quitRunningAppAndStart:(TemporaryApp *)app {
@@ -1166,6 +1310,50 @@ static NSMutableSet* hostList;
     if(self.revealViewController.isStreaming) return;
     [self prepareToStreamApp:app];
     [self performSegueWithIdentifier:@"createStreamFrame" sender:nil];
+}
+
+- (BOOL)reconnectStreamFromController:(StreamFrameViewController *)controller
+                               mode:(SunlightStreamMode)mode
+             remainingQualityDrafts:(NSDictionary<NSNumber *, SunlightStreamQualityProfile *> *)drafts
+             remainingQualityResets:(NSSet<NSNumber *> *)resets {
+    NSAssert(NSThread.isMainThread, @"Reconnect is a UI operation");
+    // Capture the exact app and host session before tearing down the old screen.
+    // A stale panel must never launch another selection or quit the PC app.
+    if (controller != streamFrameViewController || self.navigationController.topViewController != controller ||
+        launchedApp == nil || ![launchedApp.id isEqualToString:controller.streamConfig.appID] ||
+        mode < SunlightStreamMode2D || mode > SunlightStreamModeRawHalfSBS) return NO;
+    TemporaryApp *app = launchedApp;
+    NSDictionary *remainingDrafts = [drafts copy];
+    NSSet *remainingResets = [resets copy];
+    NSString *hostSession = [controller.streamConfig.hostSessionId copy];
+    NSString *appUUID = [controller.streamConfig.appUUID copy];
+    StreamManager *retiringManager = controller.streamMan;
+    NSUInteger generation = ++_streamLaunchGeneration;
+    [controller returnToMainFrame];
+    [self showLoadingFrame:nil];
+    __weak typeof(self) weakSelf = self;
+    [retiringManager stopStreamWithCompletion:^{
+        typeof(self) self = weakSelf;
+        if (!self) return;
+        // A user may navigate or start another stream while teardown finishes.
+        if (generation != self->_streamLaunchGeneration || self.navigationController.topViewController != self ||
+            (self->_selectedHost && ![self->_selectedHost.uuid isEqualToString:app.host.uuid])) {
+            [self hideLoadingFrame:nil];
+            return;
+        }
+        [self hideLoadingFrame:^{
+            if (generation != self->_streamLaunchGeneration || self.navigationController.topViewController != self) return;
+            // Dismissing the loading controller may reappear the browser and
+            // reset its streaming flag, so prepare only after that transition.
+            [self prepareToStreamApp:app mode:mode];
+            self->_streamConfig.appUUID = appUUID;
+            self->_streamConfig.expectedHostSessionId = hostSession;
+            self->_streamConfig.reconnectRetainedSession = YES;
+            [self performSegueWithIdentifier:@"createStreamFrame"
+                                      sender:@{@"qualityDrafts": remainingDrafts ?: @{}, @"qualityResets": remainingResets ?: [NSSet set]}];
+        }];
+    }];
+    return YES;
 }
 
 - (void)appLongClicked:(TemporaryApp *)app view:(UIView *)view {
@@ -1305,10 +1493,87 @@ static NSMutableSet* hostList;
 
 #if !TARGET_OS_TV
 
+- (void)openGlobalSettings {
+    if (_enteredAppView || self.isStreaming || self.presentedViewController) return;
+    UIStoryboard *storyboard = [UIStoryboard storyboardWithName:PublicUtils.isIPhone ? @"iPhone" : @"iPad" bundle:nil];
+    SettingsViewController *settings = [storyboard instantiateViewControllerWithIdentifier:@"settingsViewController"];
+    settings.mainFrameViewController = self;
+    settings.globalCategoryIdentifier = @"all";
+    settings.title = NSLocalizedString(@"Global settings", nil);
+    settings.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    settings.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:NSLocalizedString(@"Done", nil)
+        style:UIBarButtonItemStylePlain target:self action:@selector(closeGlobalSettings)];
+    settings.navigationItem.rightBarButtonItem.accessibilityIdentifier = @"global.settings.done";
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:settings];
+    navigation.modalPresentationStyle = UIModalPresentationPageSheet;
+    [SunlightUITheme styleNavigationController:navigation];
+    [self presentViewController:navigation animated:YES completion:nil];
+}
+
+- (void)closeGlobalSettings {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (SunlightSharedSettings *)globalSharedSettings {
+    TemporarySettings *saved = [[[DataManager alloc] init] getSettings];
+    SunlightSharedSettings *global = [[SunlightSharedSettings alloc] init];
+    global.preferredCodec = saved.preferredCodec;
+    global.framePacingMode = saved.framePacingMode.integerValue;
+    global.audioConfig = saved.audioConfig.integerValue;
+    global.enableHdr = saved.enableHdr;
+    global.fullColorRange = saved.fullColorRange;
+    global.playAudioOnPC = saved.playAudioOnPC;
+    return global;
+}
+
+- (SunlightMachineControlsSettings *)globalMachineControls {
+    TemporarySettings *saved = [[[DataManager alloc] init] getSettings];
+    SunlightMachineControlsSettings *controls = [[SunlightMachineControlsSettings alloc] init];
+    id trackpad = [NSUserDefaults.standardUserDefaults objectForKey:@"sunlight.preferTrackpad"];
+    BOOL preferTrackpad = ![trackpad isKindOfClass:NSNumber.class] || [trackpad boolValue];
+    controls.controlMode = preferTrackpad ? SunlightMachineControlModeTrackpad : SunlightMachineControlModeSavedTouchProfile;
+    controls.localVolume = saved.localVolume ? saved.localVolume.doubleValue : 1;
+    controls.statsOverlayLevel = saved.statsOverlayEnabled ? MIN(2, MAX(1, saved.statsOverlayLevel.integerValue)) : 0;
+    return [SunlightMachineControlsSettings globalControlsWithDefaults:NSUserDefaults.standardUserDefaults fallback:controls];
+}
+
+- (void)openMachineSettings {
+    if (!_enteredAppView || self.isStreaming || self.presentedViewController) return;
+    NSString *hostUUID = [_selectedHost.uuid copy];
+    if ([hostUUID stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length == 0) return;
+    SunlightSharedSettings *global = [self globalSharedSettings];
+    SunlightSharedSettings *resolved = [SunlightSharedSettings settingsForHostUUID:hostUUID
+        defaults:NSUserDefaults.standardUserDefaults globalDefaults:global];
+    SunlightSharedSettingsViewController *settings = [[SunlightSharedSettingsViewController alloc]
+        initWithSettings:resolved globalDefaults:global
+        hostName:_selectedHost.name ?: NSLocalizedString(@"This PC", nil)
+        glassesOutput:[ExternalDisplayCoordinator sharedCoordinator].enabled];
+    settings.reconnectRequired = NO;
+    SunlightMachineControlsSettings *globalControls = [self globalMachineControls];
+    settings.globalMachineControls = globalControls;
+    settings.machineControls = [SunlightMachineControlsSettings settingsForHostUUID:hostUUID
+        defaults:NSUserDefaults.standardUserDefaults globalDefaults:globalControls];
+    __weak typeof(self) weakSelf = self;
+    settings.applyMachineSettings = ^(SunlightSharedSettings *draft, BOOL useGlobalDefaults, SunlightMachineControlsSettings *controls) {
+        typeof(self) self = weakSelf;
+        if (!self || self.isStreaming) return;
+        if (useGlobalDefaults) {
+            [SunlightSharedSettings removeForHostUUID:hostUUID defaults:NSUserDefaults.standardUserDefaults];
+            [SunlightMachineControlsSettings removeForHostUUID:hostUUID defaults:NSUserDefaults.standardUserDefaults];
+        } else {
+            [draft saveForHostUUID:hostUUID defaults:NSUserDefaults.standardUserDefaults globalDefaults:global];
+            [controls saveForHostUUID:hostUUID defaults:NSUserDefaults.standardUserDefaults globalDefaults:globalControls];
+        }
+        [self dismissViewControllerAnimated:YES completion:nil];
+    };
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:settings];
+    navigation.modalPresentationStyle = UIModalPresentationPageSheet;
+    [SunlightUITheme styleNavigationController:navigation];
+    [self presentViewController:navigation animated:YES completion:nil];
+}
+
 - (void)expandSettingsView { //simulate pressing the setting button, called from setting view controller.
-    if (currentPosition == FrontViewPositionLeft) {
-        [[self revealViewController] revealToggleAnimated:YES];
-    }
+    [self openGlobalSettings];
 }
 
 - (void)closeSettingViewAnimated:(BOOL)anaimated { //simulate pressing the setting button, called from setting view controller.
@@ -1318,35 +1583,11 @@ static NSMutableSet* hostList;
 }
 
 - (void)profilesButtonTapped {
-    if([GenericUtils isFirstTappingGameProfileSelectorFromMainFrame]){
-        
-        DataManager* dataMan = [[DataManager alloc] init];
-        Settings* settings = [dataMan retrieveSettings];
-
-        
-        NSString* edgeSide = settings.slideToSettingsScreenEdge.intValue != UIRectEdgeLeft ? [LocalizationHelper localizedStringForKey:@"left"] : [LocalizationHelper localizedStringForKey:@"right"];
-        NSString* slideDist = [NSString stringWithFormat:@"%d%%", (int)(settings.slideToSettingsDistance.floatValue*100)];
-
-        [AlertControllerUtil showAlertIn:self
-                                        title:[LocalizationHelper localizedStringForKey:@"Game Profile"]
-                                      message:[LocalizationHelper localizedStringForKey:@"gameProfileIntroduction", edgeSide, slideDist]
-                                   withCancel:NO
-                                  buttonTitle:[LocalizationHelper localizedStringForKey:@"Got it!"]
-                                    countdown:6
-                                       action:^{}
-                                   completion:^{
-            [self openGameProfileSeletorWithAnimated:false];
-        }];
-    }
-    else [self openGameProfileSeletorWithAnimated:false];
+    if (self.presentedViewController) return;
+    [self openGameProfileSeletorWithAnimated:YES];
 }
 
 - (void)openGameProfileSeletorWithAnimated:(bool)animated {
-    if(self.settingsViewController){
-        [self.settingsViewController mainFrameGameProfileButtonTapped:animated];
-        return;
-    }
-    
     LayoutOnScreenControlsViewController* layoutToolVC;
     BOOL isIPhone = ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPhone);
     if (isIPhone) {
@@ -1396,7 +1637,7 @@ static NSMutableSet* hostList;
             _settingsButton.sharesBackground = false;
             _profilesButton.sharesBackground = false;
         }
-        self.navigationItem.leftBarButtonItems = @[_settingsButton, _profilesButton];
+        [self updateBrowserNavigation];
         
         if(streamFrameViewController.streamMan){
             // NSLog(@"setNeedRequeuing %f", CACurrentMediaTime());
@@ -1410,7 +1651,7 @@ static NSMutableSet* hostList;
     else {
         if(self.revealViewController.isStreaming) self.settingsExpandedInStreamView = true; //notify mainFrameViewContorller that this is a setting expansion in stream view, some settings shall be disabled.
         if (@available(iOS 13.0, *)) [ControllerNavigator setUINavigationDelegate:self.settingsViewController];
-        self.navigationItem.leftBarButtonItems = @[_profilesButton];
+        [self updateBrowserNavigation];
         [self.settingsViewController updateTheme];
     }
 
@@ -1523,6 +1764,10 @@ static NSMutableSet* hostList;
         streamFrameViewController = segue.destinationViewController;
         streamFrameViewController.mainFrameViewcontroller = self;
         streamFrameViewController.streamConfig = _streamConfig;
+        if ([sender isKindOfClass:NSDictionary.class]) {
+            streamFrameViewController.initialQualityDrafts = sender[@"qualityDrafts"];
+            streamFrameViewController.initialQualityResetModes = sender[@"qualityResets"];
+        }
     }
     NSLog(@"streamVC seque... %lu %f",(uintptr_t)streamFrameViewController , CACurrentMediaTime());
 }
@@ -1549,14 +1794,6 @@ static NSMutableSet* hostList;
     [super viewSafeAreaInsetsDidChange];
     
     [self adjustScrollViewForSafeArea:self.collectionView];
-}
-
-- (void)waterMarkTapped {
-    // Handle the tap action here, e.g., open a URL
-    NSURL *url = [NSURL URLWithString:[LocalizationHelper localizedStringForKey:@"supportLink"]];
-    if ([[UIApplication sharedApplication] canOpenURL:url]) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-    }
 }
 
 - (BOOL)isFullScreenRequired {
@@ -1587,10 +1824,6 @@ static NSMutableSet* hostList;
         self->waterMark.alpha = 0.2;
         self->waterMark.textAlignment = NSTextAlignmentCenter;
         self->waterMark.backgroundColor = [UIColor clearColor];
-        self->waterMark.userInteractionEnabled = YES; // Enable user interaction for tap gesture
-        // Add tap gesture recognizer to handle hyperlink action
-        UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(waterMarkTapped)];
-        [self->waterMark addGestureRecognizer:tapGesture];
         // Add the label to the view hierarchy
         [self.view addSubview:self->waterMark];
         // Set up constraints
@@ -1733,17 +1966,36 @@ static NSMutableSet* hostList;
     }
 }
 
-- (void)applyNavBarAppearance{
-    if (@available(iOS 13.0, *)) {
-        self.navigationController.navigationBar.standardAppearance.backgroundColor = [UIColor clearColor]; // old ios depend on this, do not remove
-        self.navigationController.navigationBar.standardAppearance = navBarAppearanceStandard;
-        self.navigationController.navigationBar.scrollEdgeAppearance = navBarAppearanceStandard;
+- (NSArray<UIBarButtonItem *> *)hostNavigationButtons {
+    return @[_settingsButton, _profilesButton];
+}
+
+- (void)updateBrowserNavigation {
+#if !TARGET_OS_TV
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.revealViewController.panGestureRecognizer.enabled = NO;
+    if (_enteredAppView) {
+        self.navigationItem.leftBarButtonItems = _upButton ? @[_upButton] : @[];
+        self.navigationItem.rightBarButtonItems = _machineSettingsButton ? @[_machineSettingsButton] : @[];
+        _machineSettingsButton.accessibilityHint = [NSString stringWithFormat:
+            NSLocalizedString(@"Settings shared by all apps and modes on %@", nil),
+            _selectedHost.name ?: NSLocalizedString(@"this PC", nil)];
+    } else {
+        self.navigationItem.leftBarButtonItems = _addHostButton && _helpButton ? @[_addHostButton, _helpButton] : @[];
+        self.navigationItem.rightBarButtonItems = [self hostNavigationButtons];
     }
-    else{
-        self.navigationController.navigationBar.backgroundColor = [UIColor clearColor]; // old ios depend on this, do not remove
-        self.navigationController.navigationBar.barTintColor = [UIColor clearColor]; // ios 14 depend on this, do not remove
-        self.navigationController.navigationBar.barTintColor = ThemeManager.hostViewBackgroundColor; // ios 14 depend on this, do not remove
-    }
+#else
+    self.navigationItem.rightBarButtonItems = _enteredAppView ? @[_upButton] : @[_helpButton, _addHostButton];
+#endif
+}
+
+- (void)applyNavBarAppearance {
+#if !TARGET_OS_TV
+    [SunlightUITheme styleNavigationController:self.navigationController];
+#else
+    self.navigationController.navigationBar.standardAppearance = navBarAppearanceStandard;
+    self.navigationController.navigationBar.scrollEdgeAppearance = navBarAppearanceStandard;
+#endif
 }
 
 - (void)applyThemeToNavigationButton:(UIBarButtonItem *)barButtonItem {
@@ -1752,7 +2004,7 @@ static NSMutableSet* hostList;
     barButtonItem.tintColor = ThemeManager.appPrimaryColor;
 
     if (@available(iOS 13.0, *)) {
-        UIUserInterfaceStyle style = ThemeManager.overrideUserInterfaceStyle;
+        UIUserInterfaceStyle style = UIUserInterfaceStyleDark;
         UIView *customView = barButtonItem.customView;
         customView.overrideUserInterfaceStyle = style;
 
@@ -1773,15 +2025,11 @@ static NSMutableSet* hostList;
 }
 
 - (void)applyThemeToNavigationControls {
-    if (@available(iOS 13.0, *)) {
-        UIUserInterfaceStyle style = ThemeManager.overrideUserInterfaceStyle;
-        self.overrideUserInterfaceStyle = style;
-        self.view.overrideUserInterfaceStyle = style;
-        self.navigationController.overrideUserInterfaceStyle = style;
-        self.navigationController.view.overrideUserInterfaceStyle = style;
-        self.navigationController.navigationBar.overrideUserInterfaceStyle = style;
-        self.navigationItem.titleView.overrideUserInterfaceStyle = style;
-    }
+#if !TARGET_OS_TV
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    [SunlightUITheme styleNavigationController:self.navigationController];
+#endif
 
     NSMutableArray<UIBarButtonItem *> *barButtonItems = [NSMutableArray array];
     if (self.navigationItem.leftBarButtonItems) [barButtonItems addObjectsFromArray:self.navigationItem.leftBarButtonItems];
@@ -1791,6 +2039,7 @@ static NSMutableSet* hostList;
     if (_addHostButton) [barButtonItems addObject:_addHostButton];
     if (_helpButton) [barButtonItems addObject:_helpButton];
     if (_upButton) [barButtonItems addObject:_upButton];
+    if (_machineSettingsButton) [barButtonItems addObject:_machineSettingsButton];
 
     for (UIBarButtonItem *barButtonItem in barButtonItems) {
         [self applyThemeToNavigationButton:barButtonItem];
@@ -1828,53 +2077,27 @@ static NSMutableSet* hostList;
 
 
 
-    self.navigationItem.rightBarButtonItems = @[_helpButton, _addHostButton]; // 顺序：右边靠右的是第一个
-
-    // Set the side bar button action. When it's tapped, it'll show the sidebar.
-
-    [_settingsButton setTarget:self.revealViewController];
-    [_settingsButton setAction:@selector(revealToggle:)];
-    if (@available(iOS 13.0, *)) {
-        [_settingsButton setTitle:nil];
-        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:PublicUtils.liquidGlassEnabled ? 18 : 23 weight:UIImageSymbolWeightMedium ];
-        UIImage *image = [[UIImage systemImageNamed:@"sidebar.left" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-        [_settingsButton setImage:image];
-        _settingsButton.imageInsets = PublicUtils.liquidGlassEnabled ? UIEdgeInsetsMake(0, 0, 0, 0.55) : UIEdgeInsetsMake(10, 10, 0, 0);
-        if(PublicUtils.liquidGlassEnabled){
-            // if(@available(iOS 26.0, *)) _settingsButton.hidesSharedBackground = YES;
-            _settingsButton.tintColor = ThemeManager.appPrimaryColor;
-        }
-    } else {
-        [_settingsButton setTitle:[LocalizationHelper localizedStringForKey:@"Settings"]];
-    }
+    // The machine list is the sole entry point for global settings.
+    [_settingsButton setTarget:self];
+    _settingsButton.accessibilityLabel = NSLocalizedString(@"Global settings", nil);
+    _settingsButton.accessibilityHint = NSLocalizedString(@"Defaults shared by all PCs", nil);
+    _settingsButton.accessibilityIdentifier = @"sunlight.browser.globalSettings";
+    [_settingsButton setAction:@selector(openGlobalSettings)];
+    [_settingsButton setTitle:nil];
+    [_settingsButton setImage:[SunlightMoonlightIcons imageNamed:@"ic_settings"]];
+    _settingsButton.imageInsets = UIEdgeInsetsZero;
+    _settingsButton.tintColor = SunlightUITheme.accentColor;
 
     [_profilesButton setTarget:self];
     [_profilesButton setAction:@selector(profilesButtonTapped)];
-    if (@available(iOS 13.0, *)) {
-        [_profilesButton setTitle:nil];
-        
-        UIImageSymbolConfiguration *config;
-        UIImage *image;
-        if(PublicUtils.iOS18Available){
-            config = [UIImageSymbolConfiguration configurationWithPointSize:PublicUtils.liquidGlassEnabled ? 20.5 : 22.5 weight:PublicUtils.liquidGlassEnabled ? UIImageSymbolWeightRegular :  UIImageSymbolWeightRegular];
-            image = [[UIImage systemImageNamed: @"gamecontroller.circle" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-            [_profilesButton setImage:image];
-            _profilesButton.imageInsets = PublicUtils.liquidGlassEnabled ? UIEdgeInsetsMake(0, 0, 0, 0.55) : UIEdgeInsetsMake(10, 10, 0, 0);
-            if(PublicUtils.liquidGlassEnabled){
-                _profilesButton.tintColor = ThemeManager.appPrimaryColor;
-            }
-        }
-        else{
-            image = [[UIImage imageNamed: @"gamecontroller.circle.regular"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-            [_profilesButton setImage:image];
-            _profilesButton.imageInsets = UIEdgeInsetsMake(-1.5, 0, -1.5, 0);
-            _profilesButton.tintColor = ThemeManager.appPrimaryColor;
-        }
-        
-    } else {
-        [_profilesButton setTitle:[LocalizationHelper localizedStringForKey:@"Game Profile"]];
-    }
-    
+    _profilesButton.accessibilityLabel = NSLocalizedString(@"Pad settings", nil);
+    _profilesButton.accessibilityHint = NSLocalizedString(@"Touch and gamepad profiles on this device", nil);
+    _profilesButton.accessibilityIdentifier = @"sunlight.browser.padSettings";
+    [_profilesButton setTitle:nil];
+    [_profilesButton setImage:[SunlightMoonlightIcons imageNamed:@"ic_xr_gamepad"]];
+    _profilesButton.imageInsets = UIEdgeInsetsZero;
+    _profilesButton.tintColor = SunlightUITheme.accentColor;
+
     if (@available(iOS 26.0, *)) {
         _settingsButton.sharesBackground = false;
         _profilesButton.sharesBackground = false;
@@ -1891,9 +2114,9 @@ static NSMutableSet* hostList;
     if (@available(iOS 13.0, *)) {
         [_upButton setTitle:@""];
         UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:PublicUtils.liquidGlassEnabled ? 16 : 21.5 weight:UIImageSymbolWeightMedium];
-        UIImage *image = [[UIImage systemImageNamed:PublicUtils.liquidGlassEnabled ? @"macwindow.on.rectangle" : @"tv" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *image = [[UIImage systemImageNamed:@"chevron.left" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         [_upButton setImage:image];
-        _upButton.imageInsets = PublicUtils.liquidGlassEnabled ? UIEdgeInsetsMake(0, 0, 0, 1) : UIEdgeInsetsMake(25, 20, 0, 15);
+        _upButton.imageInsets = UIEdgeInsetsZero;
     } else {
         [_upButton setTitle:[LocalizationHelper localizedStringForKey:@"Select New Host"]];
     }
@@ -1901,6 +2124,13 @@ static NSMutableSet* hostList;
     //[self->_upButton setTitle: [LocalizationHelper localizedStringForKey: @"Select New Host"]];
     [_upButton setTarget:self];
     [_upButton setAction:@selector(switchToHostView)];
+    _upButton.accessibilityLabel = NSLocalizedString(@"Back to machines", nil);
+    _upButton.accessibilityIdentifier = @"sunlight.browser.backToMachines";
+    _machineSettingsButton = [[UIBarButtonItem alloc] initWithImage:[SunlightMoonlightIcons imageNamed:@"ic_settings"]
+        style:UIBarButtonItemStylePlain target:self action:@selector(openMachineSettings)];
+    _machineSettingsButton.accessibilityLabel = NSLocalizedString(@"PC settings", nil);
+    _machineSettingsButton.accessibilityIdentifier = @"sunlight.browser.machineSettings";
+    [self updateBrowserNavigation];
 }
 
 - (void)updateTheme {
@@ -2193,11 +2423,19 @@ static NSMutableSet* hostList;
     CGFloat appWindowWidth = window.frame.size.width * screenScale;
     CGFloat appWindowHeight = window.frame.size.height * screenScale;
 
-    if(externalDisplayMode == 1 && UIScreen.screens.count > 1){
-        CGRect bounds = [UIScreen.screens.lastObject bounds];
-        screenScale = [UIScreen.screens.lastObject scale];
-        appWindowWidth = bounds.size.width * screenScale;
-        appWindowHeight = bounds.size.height * screenScale;
+    if (@available(iOS 13.0, *)) {
+        UIScreen *screen = [SceneDelegate externalDisplayScreen];
+        if (externalDisplayMode == 1 && screen) {
+            screenScale = screen.scale;
+            appWindowWidth = screen.bounds.size.width * screenScale;
+            appWindowHeight = screen.bounds.size.height * screenScale;
+            // Fullscreen quality describes one eye, not the complete SBS scanout.
+            if (screen.currentMode.size.width == 3840 && screen.currentMode.size.height == 1080 &&
+                appWindowWidth == 3840 && appWindowHeight == 1080) {
+                appWindowWidth /= 2;
+            }
+            safeAreaWidth = appWindowWidth;
+        }
     }
     
     bool needSwapWidthAndHeight = appWindowWidth < appWindowHeight;
@@ -2215,7 +2453,8 @@ static NSMutableSet* hostList;
 
     // add app window resolution and not swap width and height
     resolutionTable[3] = (CMVideoDimensions){ .width = (int32_t)safeAreaWidth, .height = (int32_t)appWindowHeight };
-    resolutionTable[4] = (CMVideoDimensions){ .width = (int32_t)appWindowWidth, .height = (int32_t)appWindowHeight };
+    CGSize native = SunlightNativeLandscapeSize();
+    resolutionTable[4] = (CMVideoDimensions){ .width = (int32_t)native.width, .height = (int32_t)native.height };
 }
 
 -(void) updateResolutionAccordingly {
@@ -2358,11 +2597,6 @@ static NSMutableSet* hostList;
 #endif
     
     [self.navigationController setNavigationBarHidden:NO animated:NO];
-    
-    // Hide 1px border line
-    UIImage* fakeImage = [[UIImage alloc] init];
-    // [self.navigationController.navigationBar setShadowImage:fakeImage];
-    // [self.navigationController.navigationBar setBackgroundImage:fakeImage forBarPosition:UIBarPositionAny barMetrics:UIBarMetricsDefault];
     
     // Check for a pending shortcut action when appearing
     [self handlePendingShortcutAction];
@@ -2644,8 +2878,8 @@ static NSMutableSet* hostList;
         appView.transform = CGAffineTransformMakeScale(scale, scale); // view resize
     }
     
-    [cell.subviews.firstObject removeFromSuperview]; // Remove a view that was previously added
-    [cell addSubview:appView];
+    for (UIView *oldView in cell.contentView.subviews) [oldView removeFromSuperview];
+    [cell.contentView addSubview:appView];
     // [self.settingsButton setEnabled:![self isIPhonePortrait]]; // update settings button after host is clicked & appview loaded
     // Shadow opacity is controlled inside UIAppView based on whether the app
     // is hidden or not during the update cycle.
@@ -2670,14 +2904,8 @@ static NSMutableSet* hostList;
     CGSize cellSize;
     if(PublicUtils.isIPhone) cellSize.height = 0.365*MIN(CGRectGetHeight([[UIScreen mainScreen] bounds]),CGRectGetWidth([[UIScreen mainScreen] bounds]));
     else cellSize.height = 0.272*MIN(CGRectGetHeight([[UIScreen mainScreen] bounds]),CGRectGetWidth([[UIScreen mainScreen] bounds]));
-    TemporaryApp* app = self.sortedAppList[indexPath.row];
-    UIAppView* appView = [[UIAppView alloc] initWithApp:app cache:_boxArtCache andCallback:self];
-
-    cellSize.width = cellSize.height * (appView
-                                        .bounds.size.width/appView
-                                        .bounds.size.height);
-    // cardSize.width =
-    
+    // Card geometry is fixed; measuring must not instantiate controls or load artwork.
+    cellSize.width = cellSize.height * UIAppView.preferredAspectRatio;
     return cellSize;
 }
 
@@ -2885,35 +3113,16 @@ static NSMutableSet* hostList;
     dispatch_async(dispatch_get_main_queue(), ^{
         switch (item) {
             case RadialMenuItemSettings:
-                if(self.isStreaming && !self.settingsViewExpanded) [self->streamFrameViewController expandSettingsView];
-                else [[self revealViewController] revealToggleAnimated:YES];
+                if (self.isStreaming) [self->streamFrameViewController expandSettingsView];
+                else if (self->_enteredAppView) [self openMachineSettings];
+                else [self openGlobalSettings];
                 break;
             case RadialMenuItemAllSettings:
-                [self.revealViewController allSettingSelected];
-                break;
             case RadialMenuItemFavoriteSettings:
-                [self.revealViewController favoriteSettingSelected];
+                [self controllerNavigatorDidSelectSettings];
                 break;
             case RadialMenuItemGameProfiles:
-                if([GenericUtils isFirstTappingGameProfileSelectorFromMainFrame]){
-                    DataManager* dataMan = [[DataManager alloc] init];
-                    Settings* settings = [dataMan retrieveSettings];
-                    NSString* edgeSide = settings.slideToSettingsScreenEdge.intValue != UIRectEdgeLeft ? [LocalizationHelper localizedStringForKey:@"left"] : [LocalizationHelper localizedStringForKey:@"right"];
-                    NSString* slideDist = [NSString stringWithFormat:@"%d%%", (int)(settings.slideToSettingsDistance.floatValue*100)];
-                    [AlertControllerUtil showAlertIn:self
-                                               title:[LocalizationHelper localizedStringForKey:@"Game Profile"]
-                                             message:[LocalizationHelper localizedStringForKey:@"gameProfileIntroduction", edgeSide, slideDist]
-                                          withCancel:NO
-                                         buttonTitle:[LocalizationHelper localizedStringForKey:@"Got it!"]
-                                           countdown:6
-                                              action:^{}
-                                          completion:^{
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [self openGameProfileSeletorWithAnimated:false];
-                        });
-                    }];
-                }
-                else [self openGameProfileSeletorWithAnimated:true];
+                [self profilesButtonTapped];
                 break;
             case RadialMenuItemHostView:
                 [self switchToHostView];
@@ -2932,7 +3141,9 @@ static NSMutableSet* hostList;
 
 - (void)controllerNavigatorDidSelectSettings {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[self revealViewController] revealToggleAnimated:YES];
+        if (self.isStreaming) [self->streamFrameViewController expandSettingsView];
+        else if (self->_enteredAppView) [self openMachineSettings];
+        else [self openGlobalSettings];
     });
 }
 

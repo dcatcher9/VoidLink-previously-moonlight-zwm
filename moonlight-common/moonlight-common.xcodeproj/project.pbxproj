@@ -11,8 +11,8 @@
 		180B87D72E65DF27007D9E22 /* RecorderCallbacks.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87D52E65DF27007D9E22 /* RecorderCallbacks.c */; };
 		180B87D82E65DF27007D9E22 /* MicrophoneStream.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87D42E65DF27007D9E22 /* MicrophoneStream.c */; };
 		180B87D92E65DF27007D9E22 /* RecorderCallbacks.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87D52E65DF27007D9E22 /* RecorderCallbacks.c */; };
-		180B87DA2E65DF27007D9E22 /* rswrapper.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87DB2E65DF27007D9E22 /* rswrapper.c */; };
-		180B87DC2E65DF27007D9E22 /* rswrapper.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87DB2E65DF27007D9E22 /* rswrapper.c */; };
+		180B87DA2E65DF27007D9E22 /* rs.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87DB2E65DF27007D9E22 /* rs.c */; };
+		180B87DC2E65DF27007D9E22 /* rs.c in Sources */ = {isa = PBXBuildFile; fileRef = 180B87DB2E65DF27007D9E22 /* rs.c */; };
 		1815D5002E6E0001007D9E22 /* Ds5HapticsStream.c in Sources */ = {isa = PBXBuildFile; fileRef = 1815D5042E6E0001007D9E22 /* Ds5HapticsStream.c */; };
 		1815D5012E6E0001007D9E22 /* Ds5HapticsIrStream.c in Sources */ = {isa = PBXBuildFile; fileRef = 1815D5062E6E0001007D9E22 /* Ds5HapticsIrStream.c */; };
 		1815D5022E6E0001007D9E22 /* Ds5HapticsStream.c in Sources */ = {isa = PBXBuildFile; fileRef = 1815D5042E6E0001007D9E22 /* Ds5HapticsStream.c */; };
@@ -94,8 +94,8 @@
 /* Begin PBXFileReference section */
 		180B87D42E65DF27007D9E22 /* MicrophoneStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = MicrophoneStream.c; sourceTree = "<group>"; };
 		180B87D52E65DF27007D9E22 /* RecorderCallbacks.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = RecorderCallbacks.c; sourceTree = "<group>"; };
-		180B87DB2E65DF27007D9E22 /* rswrapper.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = rswrapper.c; sourceTree = "<group>"; };
-		180B87DD2E65DF27007D9E22 /* rswrapper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rswrapper.h; sourceTree = "<group>"; };
+		180B87DB2E65DF27007D9E22 /* rs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "../reedsolomon/rs.c"; sourceTree = "<group>"; };
+		180B87DD2E65DF27007D9E22 /* rs.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "../reedsolomon/rs.h"; sourceTree = "<group>"; };
 		1815D5042E6E0001007D9E22 /* Ds5HapticsStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Ds5HapticsStream.c; sourceTree = "<group>"; };
 		1815D5052E6E0001007D9E22 /* Ds5HapticsStream.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Ds5HapticsStream.h; sourceTree = "<group>"; };
 		1815D5062E6E0001007D9E22 /* Ds5HapticsIrStream.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Ds5HapticsIrStream.c; sourceTree = "<group>"; };
@@ -276,8 +276,8 @@
 			children = (
 				180B87D42E65DF27007D9E22 /* MicrophoneStream.c */,
 				180B87D52E65DF27007D9E22 /* RecorderCallbacks.c */,
-				180B87DB2E65DF27007D9E22 /* rswrapper.c */,
-				180B87DD2E65DF27007D9E22 /* rswrapper.h */,
+				180B87DB2E65DF27007D9E22 /* rs.c */,
+				180B87DD2E65DF27007D9E22 /* rs.h */,
 				98F1453A2667D852004018E3 /* RtpAudioQueue.h */,
 				98F145392667D852004018E3 /* RtpVideoQueue.h */,
 				98F145332667D847004018E3 /* RtpAudioQueue.c */,
@@ -423,7 +423,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				180B87DC2E65DF27007D9E22 /* rswrapper.c in Sources */,
+				180B87DC2E65DF27007D9E22 /* rs.c in Sources */,
 				98F145362667D847004018E3 /* RtpAudioQueue.c in Sources */,
 				FB1A67FA21324F4900507771 /* AudioStream.c in Sources */,
 				FB1A67FB21324F4900507771 /* ByteBuffer.c in Sources */,
@@ -466,7 +466,7 @@
 			files = (
 				98C1FC142184124C0023FDDF /* SimpleStun.c in Sources */,
 				98F145352667D847004018E3 /* RtpAudioQueue.c in Sources */,
-				180B87DA2E65DF27007D9E22 /* rswrapper.c in Sources */,
+				180B87DA2E65DF27007D9E22 /* rs.c in Sources */,
 				98AB2E401CAD425A0089BB98 /* AudioStream.c in Sources */,
 				98AB2E411CAD425A0089BB98 /* ByteBuffer.c in Sources */,
 				180B87D82E65DF27007D9E22 /* MicrophoneStream.c in Sources */,
@@ -520,9 +520,6 @@
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				HEADER_SEARCH_PATHS = (
 					"moonlight-common-c/enet/include",
-					"moonlight-common-c/nanors",
-					"moonlight-common-c/nanors/deps",
-					"moonlight-common-c/nanors/deps/obl",
 					"../libs/**",
 				);
 				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
@@ -553,9 +550,6 @@
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				HEADER_SEARCH_PATHS = (
 					"moonlight-common-c/enet/include",
-					"moonlight-common-c/nanors",
-					"moonlight-common-c/nanors/deps",
-					"moonlight-common-c/nanors/deps/obl",
 					"../libs/**",
 				);
 				MACOSX_DEPLOYMENT_TARGET = "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)";
@@ -702,9 +696,6 @@
 				EXECUTABLE_PREFIX = lib;
 				HEADER_SEARCH_PATHS = (
 					"moonlight-common-c/enet/include",
-					"moonlight-common-c/nanors",
-					"moonlight-common-c/nanors/deps",
-					"moonlight-common-c/nanors/deps/obl",
 					"../libs/**",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
@@ -723,9 +714,6 @@
 				EXECUTABLE_PREFIX = lib;
 				HEADER_SEARCH_PATHS = (
 					"moonlight-common-c/enet/include",
-					"moonlight-common-c/nanors",
-					"moonlight-common-c/nanors/deps",
-					"moonlight-common-c/nanors/deps/obl",
 					"../libs/**",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;

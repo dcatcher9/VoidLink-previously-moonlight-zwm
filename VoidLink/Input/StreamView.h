@@ -39,6 +39,17 @@
 @property (assign, nonatomic) bool widgetToolOpened;
 @property (strong, nonatomic) OnScreenControls* onScreenControls;
 @property (weak, nonatomic) PencilHandler* pencilHandler;
+@property (nonatomic, readonly) NSUInteger hostInputGeneration;
+@property (nonatomic, readonly) BOOL hostInputAllowed;
+@property (nonatomic, readonly) BOOL hostTouchInputAllowed;
+@property (nonatomic, readonly) BOOL sessionTrackpadOverrideEnabled;
+
+- (void)setHostInputConnected:(BOOL)connected;
+- (void)setLocalControlsPresented:(BOOL)presented;
+- (void)setSessionTrackpadOverrideEnabled:(BOOL)enabled;
+- (void)showSoftKeyboard;
+- (void)performHostInputForGeneration:(NSUInteger)generation action:(dispatch_block_t)action NS_SWIFT_NAME(performHostInput(generation:action:));
+- (void)performHostInput:(dispatch_block_t)action NS_SWIFT_NAME(performHostInput(action:));
 
 - (void) setupStreamViewWithControllerSupport:(ControllerSupport*)controllerSupport
                           interactionDelegate:(id<UserInteractionDelegate>)interactionDelegate

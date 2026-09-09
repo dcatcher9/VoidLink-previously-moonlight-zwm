@@ -58,6 +58,9 @@ final class FrameInterpolator: NSObject {
     private var formatDescription: CMVideoFormatDescription?
     private var previousInterpolationPixelBuffer: CVPixelBuffer?
     private var previousInterpolationPTS = CMTime.invalid
+    // One GPU operation plus two waiting decoded frames bounds retained image
+    // memory even if the processor is slower than the incoming stream.
+    private let maximumPendingFrames = 2
     private var pendingFrames: [PendingFrame] = []
     private var isProcessing = false
     private var isPaused = false
@@ -75,6 +78,9 @@ final class FrameInterpolator: NSObject {
     private var consecutiveSlowFrames = 0
     private var loggedEvents = Set<String>()
     private var overlayGeneration = 0
+
+    // Assigned once before processing; the renderer binds its original session.
+    var transientHUDHandler: ((String?) -> Void)?
 
     var isEnabled = false {
         didSet {
@@ -644,7 +650,7 @@ final class FrameInterpolator: NSObject {
             let pendingFrames = self.pendingFrames
             self.pendingFrames.removeAll()
             for pendingFrame in pendingFrames {
-                pendingFrame.completion([pendingFrame.frame])
+                pendingFrame.completion([])
             }
 
             if self.isProcessing {
@@ -667,6 +673,12 @@ final class FrameInterpolator: NSObject {
                 return
             }
 
+            if self.pendingFrames.count >= self.maximumPendingFrames {
+                let dropped = self.pendingFrames.removeFirst()
+                // Report a drop, not the newer original image: emitting that
+                // image now would overtake the older in-flight GPU result.
+                dropped.completion([])
+            }
             self.pendingFrames.append(PendingFrame(frame: frame, completion: completion))
             self.drainPendingFrames()
         }
@@ -811,7 +823,9 @@ final class FrameInterpolator: NSObject {
                     self.resetLocked(
                         resetResolutionTier: self.resetResolutionTierRequested
                     )
-                    completion([frame])
+                    // Newer frames may already have bypassed interpolation
+                    // during reset/pause. Never publish this older GPU result.
+                    completion([])
                     return
                 }
 
@@ -1247,28 +1261,19 @@ final class FrameInterpolator: NSObject {
     }
 
     private func showTransientHUDText(_ text: String) {
+        guard let handler = transientHUDHandler else { return }
         overlayGeneration &+= 1
-
         let generation = overlayGeneration
 
         DispatchQueue.main.async {
-            guard let streamFrameVC = StreamFrameViewController.sharedInstance() else {
-                return
-            }
-
-            streamFrameVC.updateTransientHUDText(text)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak streamFrameVC] in
-                guard let self, let streamFrameVC else {
-                    return
-                }
-
+            // Capture the original sink before dispatch; never resolve whichever
+            // stream controller happens to be current when the callback runs.
+            handler(text)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
                 self.queue.async {
-                    guard self.overlayGeneration == generation else {
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        streamFrameVC.updateTransientHUDText(nil)
-                    }
+                    guard self.overlayGeneration == generation else { return }
+                    DispatchQueue.main.async { handler(nil) }
                 }
             }
         }
@@ -1286,6 +1291,7 @@ final class FrameInterpolator: NSObject {
     }
 
     private func requestResetLocked() {
+        overlayGeneration &+= 1
         pendingFrames.removeAll()
         guard !isProcessing else {
             resetRequested = true

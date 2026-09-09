@@ -48,6 +48,9 @@ import UIKit
     private static let controllerNavigationHighlightDefaultsKey = "ToolboxViewController.controllerNavigationHighlightedEntry"
 
     @objc weak var specialEntryDelegate: ToolboxSpecialEntryDelegate?
+    // The stream owns this across toolbox dismissal/reopening. Nil preserves
+    // legacy toolbox behavior outside the new PC-shortcuts surface.
+    @objc public var commandOwner: CommandExecutionOwner?
 
     // Kept for Objective-C/source compatibility with older callers. The UI is now collectionView.
     public let tableView = UITableView(frame: .zero)
@@ -185,7 +188,7 @@ import UIKit
         view.addSubview(contentView)
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.text = "Toolbox".localized
+        titleLabel.text = title ?? "Toolbox".localized
         titleLabel.font = UIFont.systemFont(ofSize: PublicUtils.isIPhone ? 18 : 24, weight: .bold)
         titleLabel.textAlignment = .center
 
@@ -886,7 +889,11 @@ import UIKit
 
     private func sendKeyboardCommand(_ cmd: RemoteCommand) {
         guard let keyboardCmdStrings = CommandManager.shared.extractAutoReleaseButtonStrings(from: cmd.cmdString) else { return }
-        CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: keyboardCmdStrings)
+        if let owner = commandOwner {
+            CommandManager.shared.sendOwnedAutoReleaseComboCommand(cmdStrings: keyboardCmdStrings, owner: owner)
+        } else {
+            CommandManager.shared.sendAutoReleaseComboCommand(cmdStrings: keyboardCmdStrings)
+        }
     }
 
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {

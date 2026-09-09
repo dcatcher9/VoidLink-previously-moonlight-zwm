@@ -15,10 +15,14 @@
 #import "VoidLink-Swift.h"
 
 #import "DataManager.h"
+#import "StreamView.h"
+#import "SunlightInputDispatch.h"
+#import "Connection.h"
 #include "Limelight.h"
 #include <stdio.h>
 
 @import GameController;
+@import CoreHaptics;
 #if !TARGET_OS_TV
     @import CoreMotion;
 #endif
@@ -86,6 +90,7 @@ static void ApplyAdaptiveTriggerEffect(GCDualSenseAdaptiveTrigger* trigger,
 
 @property (assign,nonatomic) bool shallDisableGyroHotSwitch;
 
+
 @end
 
 
@@ -132,6 +137,11 @@ static void ApplyAdaptiveTriggerEffect(GCDualSenseAdaptiveTrigger* trigger,
     int _gyroMode;
     CGFloat _gyroSensitivity;
     bool _captureMouse;
+    __weak StreamView *_hostInputView;
+    BOOL _localControlsPresented;
+    BOOL _localControlPadEnabled;
+    BOOL _oscEnabledWithoutLocalPad;
+    BOOL _hostInputConnected;
     
     bool _controllerGyroSwitchEnabled;
     bool _gyroEnabledFlag; // bool flag for both DS4 gyro & VL motion control
@@ -1207,7 +1217,6 @@ static void ApplyAdaptiveTriggerEffect(GCDualSenseAdaptiveTrigger* trigger,
                 if (@available(iOS 14.5, tvOS 14.5, *)) {
                     if ([controller.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]]) {
                         type = LI_CTYPE_PS;
-                        capabilities |= LI_CCAP_DS5_HAPTICS_PCM;
                     }
                 }
             }
@@ -1276,10 +1285,22 @@ static void ApplyAdaptiveTriggerEffect(GCDualSenseAdaptiveTrigger* trigger,
             LB_FLAG | RB_FLAG | LS_CLK_FLAG | RS_CLK_FLAG | A_FLAG | B_FLAG | X_FLAG | Y_FLAG;
     }
 
+    // Advertise PCM for every eligible player, including player zero and the
+    // on-screen controller when haptics are routed to the phone. The host also
+    // requires the session callback subscription before sending authored data.
+    if (@available(iOS 14.5, tvOS 14.5, *)) {
+        BOOL canRenderPCM = [controller.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]] ||
+            (_streamConfig.hapticEngine == RumbleDevice &&
+             [CHHapticEngine capabilitiesForHardware].supportsHaptics);
+        if (type == LI_CTYPE_PS && canRenderPCM && [Connection useDualSenseAuthoredPCM]) {
+            capabilities |= LI_CCAP_DS5_HAPTICS_PCM;
+        }
+    }
+
     // Report the new controller to the host
     // NB: This will fail if the connection hasn't been fully established yet
     // and we will try again later.
-    if (LiSendControllerArrivalEvent(controller.playerIndex,
+    if (LiSendControllerArrivalEvent(voidController.playerIndex,
                                      [self getActiveGamepadMask],
                                      type,
                                      supportedButtonFlags,
@@ -1631,74 +1652,98 @@ double rc_expo(double x, double expo) {
 -(void) registerMouseCallbacks:(GCMouse*) mouse API_AVAILABLE(ios(14.0)) {
     if (_captureMouse){
         mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput * _Nonnull mouse, float deltaX, float deltaY) {
-            self->accumulatedDeltaX += deltaX / MOUSE_SPEED_DIVISOR;
-            self->accumulatedDeltaY += -deltaY / MOUSE_SPEED_DIVISOR;
-            
-            short truncatedDeltaX = (short)self->accumulatedDeltaX;
-            short truncatedDeltaY = (short)self->accumulatedDeltaY;
-            
-            if (truncatedDeltaX != 0 || truncatedDeltaY != 0) {
-                LiSendMouseMoveEvent(truncatedDeltaX, truncatedDeltaY);
-                
-                self->accumulatedDeltaX -= truncatedDeltaX;
-                self->accumulatedDeltaY -= truncatedDeltaY;
-            }
+            [self->_hostInputView performHostInput:^{
+                self->accumulatedDeltaX += deltaX / MOUSE_SPEED_DIVISOR;
+                self->accumulatedDeltaY += -deltaY / MOUSE_SPEED_DIVISOR;
+
+                short truncatedDeltaX = (short)self->accumulatedDeltaX;
+                short truncatedDeltaY = (short)self->accumulatedDeltaY;
+
+                if (truncatedDeltaX != 0 || truncatedDeltaY != 0) {
+                    LiSendMouseMoveEvent(truncatedDeltaX, truncatedDeltaY);
+
+                    self->accumulatedDeltaX -= truncatedDeltaX;
+                    self->accumulatedDeltaY -= truncatedDeltaY;
+                }
+
+            }];
         };
     } else {
         mouse.mouseInput.mouseMovedHandler = nil;
     }
 
-    
+
     mouse.mouseInput.leftButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
-        LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        [self->_hostInputView performHostInput:^{
+            LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+
+        }];
     };
     mouse.mouseInput.middleButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
-        LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+        [self->_hostInputView performHostInput:^{
+            LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+
+        }];
     };
     mouse.mouseInput.rightButton.pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
-        LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+        [self->_hostInputView performHostInput:^{
+            LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+
+        }];
     };
-    
+
     if (mouse.mouseInput.auxiliaryButtons != nil) {
         if (mouse.mouseInput.auxiliaryButtons.count >= 1) {
             mouse.mouseInput.auxiliaryButtons[0].pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
-                LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X1);
+                [self->_hostInputView performHostInput:^{
+                    LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X1);
+
+                }];
             };
         }
         if (mouse.mouseInput.auxiliaryButtons.count >= 2) {
             mouse.mouseInput.auxiliaryButtons[1].pressedChangedHandler = ^(GCControllerButtonInput * _Nonnull button, float value, BOOL pressed) {
-                LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X2);
+                [self->_hostInputView performHostInput:^{
+                    LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_X2);
+
+                }];
             };
         }
     }
-    
+
     // We use UIPanGestureRecognizer on iPadOS because it allows us to distinguish
     // between discrete and continuous scroll events and also works around a bug
     // in iPadOS 15 where discrete scroll events are dropped. tvOS only supports
     // GCMouse for mice, so we will have to just use it and hope for the best.
 #if TARGET_OS_TV
     mouse.mouseInput.scroll.xAxis.valueChangedHandler = ^(GCControllerAxisInput * _Nonnull axis, float value) {
-        self->accumulatedScrollX += value;
-        
-        short truncatedScrollX = (short)self->accumulatedScrollX;
-        
-        if (truncatedScrollX != 0) {
-            // Direction is reversed from vertical scrolling
-            LiSendHighResHScrollEvent(-truncatedScrollX * 20);
-            
-            self->accumulatedScrollX -= truncatedScrollX;
-        }
+        [self->_hostInputView performHostInput:^{
+            self->accumulatedScrollX += value;
+
+            short truncatedScrollX = (short)self->accumulatedScrollX;
+
+            if (truncatedScrollX != 0) {
+                // Direction is reversed from vertical scrolling
+                LiSendHighResHScrollEvent(-truncatedScrollX * 20);
+
+                self->accumulatedScrollX -= truncatedScrollX;
+            }
+
+        }];
     };
     mouse.mouseInput.scroll.yAxis.valueChangedHandler = ^(GCControllerAxisInput * _Nonnull axis, float value) {
-        self->accumulatedScrollY += value;
-        
-        short truncatedScrollY = (short)self->accumulatedScrollY;
-        
-        if (truncatedScrollY != 0) {
-            LiSendHighResScrollEvent(truncatedScrollY * 20);
-            
-            self->accumulatedScrollY -= truncatedScrollY;
-        }
+        [self->_hostInputView performHostInput:^{
+            self->accumulatedScrollY += value;
+
+            short truncatedScrollY = (short)self->accumulatedScrollY;
+
+            if (truncatedScrollY != 0) {
+                LiSendHighResScrollEvent(truncatedScrollY * 20);
+
+                self->accumulatedScrollY -= truncatedScrollY;
+            }
+
+        }];
     };
 #endif
 }
@@ -1957,7 +2002,8 @@ double rc_expo(double x, double expo) {
     DataManager* dataMan = [[DataManager alloc] init];
     tempSettings = [dataMan getSettings];
 
-    _oscEnabled = _oscEnabled || (OnScreenControlsLevel)[tempSettings.onscreenControls integerValue] != OnScreenControlsLevelOff || streamConfig.gyroMode != GyroModeOff;
+    _oscEnabledWithoutLocalPad = _oscEnabledWithoutLocalPad || (OnScreenControlsLevel)[tempSettings.onscreenControls integerValue] != OnScreenControlsLevelOff || streamConfig.gyroMode != GyroModeOff;
+    _oscEnabled = _oscEnabledWithoutLocalPad || _localControlPadEnabled;
     _gyroSensitivity = tempSettings.gyroSensitivity.floatValue;
     
     if (@available(iOS 13.0, *)) {
@@ -2026,9 +2072,8 @@ double rc_expo(double x, double expo) {
 -(id)initWithConfig:(StreamConfiguration*)streamConfig delegate:(id<ControllerSupportDelegate>)delegate
 {
     self = [super init];
-    if (self) {
-        VLSharedControllerSupport = self;
-    }
+    if (!self) return nil;
+    VLSharedControllerSupport = self;
     
     NSLog(@"controller support init");
         
@@ -2227,8 +2272,12 @@ double rc_expo(double x, double expo) {
 }
 
 -(void)connectionEstablished {
+    _hostInputConnected = YES;
+    if (_localControlPadEnabled) [self updateFinished:_oscController.mergedWithController ?: _oscController];
     for (VoidController* voidController in _voidControllers.allValues) {
-        if(voidController.playerIndex != 0) [self updateFinished:voidController];
+        // Retry arrival after C is ready for every physical player, including
+        // the primary DualSense, before waiting for its first input event.
+        [self updateFinished:voidController];
     }
     
     //if (_oscEnabled
@@ -2242,6 +2291,9 @@ double rc_expo(double x, double expo) {
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        // A previous connection's delayed setup must not reconfigure shared
+        // motion after cleanup or after another ControllerSupport took over.
+        if (!self->_hostInputConnected || VLSharedControllerSupport != self) return;
         self->_gyroMode = self->_streamConfig.gyroMode;
         
         [self applyGyroModeSetting];
@@ -2306,6 +2358,8 @@ double rc_expo(double x, double expo) {
 
 -(void) cleanup
 {
+    _hostInputConnected = NO;
+    _hostInputView = nil;
     [ControllerUtil stopAllDualSenseHaptics];
 #if !TARGET_OS_TV
     [_gameSirG8MFiRumbler invalidate];
@@ -2332,6 +2386,7 @@ double rc_expo(double x, double expo) {
     _controllerNumbers = 0;
     
     [self stopTimerForController:_oscController];
+    [self cleanupControllerHaptics:_oscController];
     for (VoidController* controller in [_voidControllers allValues]) {
         [self stopTimerForController:controller];
         [self cleanupControllerHaptics:controller];
@@ -2364,6 +2419,38 @@ double rc_expo(double x, double expo) {
     if (VLSharedControllerSupport == self) {
         VLSharedControllerSupport = nil;
     }
+}
+
+- (void)setHostInputView:(UIView *)view {
+    _hostInputView = [view isKindOfClass:StreamView.class] ? (StreamView *)view : nil;
+}
+
+- (void)setLocalControlsPresented:(BOOL)presented {
+    if (_localControlsPresented == presented) return;
+    _localControlsPresented = presented;
+    // StreamView serializes the transition with all GCMouse delivery and releases
+    // pressed mouse buttons before exposing the local panel.
+    accumulatedDeltaX = accumulatedDeltaY = 0;
+#if TARGET_OS_TV
+    accumulatedScrollX = accumulatedScrollY = 0;
+#endif
+}
+
+- (void)setLocalControlPadEnabled:(BOOL)enabled {
+    if (_localControlPadEnabled == enabled) return;
+    _localControlPadEnabled = enabled;
+    @synchronized (_oscController) {
+        _oscController.lastButtonFlags = 0;
+        _oscController.lastLeftTrigger = _oscController.lastRightTrigger = 0;
+        _oscController.lastLeftStickX = _oscController.lastLeftStickY = 0;
+        _oscController.lastRightStickX = _oscController.lastRightStickY = 0;
+    }
+    _oscEnabled = _oscEnabledWithoutLocalPad || enabled;
+    // A merged physical player keeps its capabilities and active-controller bit.
+    VoidController *reportingController = _oscController.mergedWithController ?: _oscController;
+    if (enabled && !_oscEnabledWithoutLocalPad && !_oscController.mergedWithController)
+        _oscController.reportedArrival = NO;
+    if (_hostInputConnected) [self updateFinished:reportingController];
 }
 
 @end

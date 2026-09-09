@@ -3,8 +3,8 @@
 **/xcschemes/*.xcscheme
 .DS_Store
 Build
+/build/
 DerivedData
 build-home/
 *.xccheckout
 .github
-README.md

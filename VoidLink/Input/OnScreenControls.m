@@ -546,15 +546,19 @@ static float L3_Y;
         case OnScreenControlsLevelCustom:
             
             [self setupComplexControls];    // Default postion for D-Pad set here
-            [self setDPadCenter:profile];    // Custom position for D-Pad set here
-            [self setAnalogStickPositions:profile]; // Custom position for analog sticks set here
+            if (profile) {
+                [self setDPadCenter:profile];    // Custom position for D-Pad set here
+                [self setAnalogStickPositions:profile]; // Custom position for analog sticks set here
+            }
             [self drawButtons:profile];
             [self drawStartSelect];
             [self drawBumpers];
             [self drawTriggers];
             [self drawSticks];
-            [self positionAndResizeSingleControllerLayers:profile];
-            [self setOpacityForCutsomControllerLayers:profile];
+            if (profile) {
+                [self positionAndResizeSingleControllerLayers:profile];
+                [self setOpacityForCutsomControllerLayers:profile];
+            }
             
             break;
         default:
@@ -1472,7 +1476,6 @@ static float L3_Y;
                     [_controllerSupport setButtonFlag:_controller flags:LS_CLK_FLAG];
                     [self handleButtonFeedback:_leftStick];
                     updated = true;
-                    touchEventCapturedByOsc = true;
                     // NSLog(@"Captured OSC LS_CLK3");
 
                 }
@@ -1490,7 +1493,6 @@ static float L3_Y;
                     [_controllerSupport setButtonFlag:_controller flags:RS_CLK_FLAG];
                     [self handleButtonFeedback:_rightStick];
                     updated = true;
-                    touchEventCapturedByOsc = true;
                     // NSLog(@"Captured OSC LS_CLK4");
                 }
             }

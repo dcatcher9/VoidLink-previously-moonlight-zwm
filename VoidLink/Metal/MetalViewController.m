@@ -19,7 +19,11 @@
     MetalVideoRenderer *_renderer;
     MetricsHandler _metricsHandler;
     CADisplayLink *_displayLink;
-    BOOL _frameSlotAcquired;
+    // Only the render worker accesses this reference. It owns a successful
+    // wait/render pair even if shutdown clears the active renderer meanwhile.
+    MetalVideoRenderer *_acquiredFrameRenderer;
+    SunlightStreamMode _streamMode;
+    BOOL _stereoOutputEnabled;
 }
 
 - (nonnull instancetype)initWithFrame:(CGRect)bounds framerate:(float)framerate settings:(TemporarySettings* )settings metricsHandler:(MetricsHandler)metricsHandler {
@@ -86,7 +90,11 @@
         Log(LOG_E, @"The renderer couldn't be initialized.");
         return;
     }
-    self->_renderer = renderer;
+    @synchronized (self) {
+        renderer.streamMode = _streamMode;
+        renderer.stereoOutputEnabled = _stereoOutputEnabled;
+        _renderer = renderer;
+    }
     Log(LOG_I, @"[MetalViewController] viewDidLoad, created renderer: %@", renderer);
 
     // Initialize the renderer-dependent view properties.
@@ -108,38 +116,75 @@
     // Rendering does not use DisplayLink, this exists to fool iOS into keeping us running at the desired framerate
 }
 
+- (MetalVideoRenderer *)currentRenderer {
+    // Strong ivar reads must synchronize with shutdown's final release.
+    @synchronized (self) {
+        return _renderer;
+    }
+}
+
+- (SunlightStreamMode)streamMode {
+    @synchronized (self) {
+        return _streamMode;
+    }
+}
+
+- (void)setStreamMode:(SunlightStreamMode)streamMode {
+    @synchronized (self) {
+        _streamMode = streamMode;
+        _renderer.streamMode = streamMode;
+    }
+}
+
+- (BOOL)stereoOutputEnabled {
+    @synchronized (self) {
+        return _stereoOutputEnabled;
+    }
+}
+
+- (void)setStereoOutputEnabled:(BOOL)stereoOutputEnabled {
+    @synchronized (self) {
+        _stereoOutputEnabled = stereoOutputEnabled;
+        _renderer.stereoOutputEnabled = stereoOutputEnabled;
+    }
+}
+
 - (void)waitToRenderTo:(nonnull CAMetalLayer *)layer {
-    // Snapshot into a strong local: shutdown (main thread) can nil _renderer while
-    // the render thread is inside this method.
-    MetalVideoRenderer *renderer = _renderer;
+    MetalVideoRenderer *renderer = [self currentRenderer];
+    _acquiredFrameRenderer = nil;
 
     // Skip waiting when renderer is paused or gone
     if (!renderer || renderer.isStopping) {
-        _frameSlotAcquired = NO;
         return;
     }
 
     if (@available(iOS 13.0, *)) {
-        _frameSlotAcquired = [renderer waitToRenderTo:layer];
+        if ([renderer waitToRenderTo:layer]) {
+            _acquiredFrameRenderer = renderer;
+        }
     }
 
-    if (_frameSlotAcquired) {
-        [_frameQueue waitForEnqueue];
+    if (_acquiredFrameRenderer) {
+        [_frameQueue waitForActiveEnqueueUntilCancelled:^BOOL{
+            return renderer.isStopping;
+        }];
     }
 }
 
 /// Draw frame (used by manual loop)
 - (void)renderTo:(nonnull CAMetalLayer *)layer {
-    if (!_frameSlotAcquired) {
-        return;
-    }
-    // Snapshot for the same reason as in waitToRenderTo
-    MetalVideoRenderer *renderer = _renderer;
+    MetalVideoRenderer *renderer = _acquiredFrameRenderer;
+    _acquiredFrameRenderer = nil;
     if (!renderer) {
         return;
     }
+    if (renderer.isStopping) {
+        // A cancelled session must not consume the next session's first frame.
+        dispatch_semaphore_signal(renderer.inFlightSemaphore);
+        return;
+    }
     CFTimeInterval timeout = (1.0f / _framerate) - renderer.averageGPUTime;
-    Frame *frame = [_frameQueue dequeueWithTimeoutSync:timeout];
+    Frame *frame = [_frameQueue dequeueWithTimeoutSync:timeout untilCancelled:^BOOL{ return renderer.isStopping; }];
 
     if (!renderer.isStopping) {
         // Only render if not paused
@@ -151,31 +196,26 @@
             dispatch_semaphore_signal([renderer inFlightSemaphore]);
         }
     } else {
-        // When paused, we still dequeue frames to prevent accumulation
-        // but don't render them. Also sleep a bit to reduce CPU usage
         dispatch_semaphore_signal([renderer inFlightSemaphore]);
-        usleep(100000);
     }
 }
 
 - (void)drawableResize:(CGSize)size {
-    [_renderer drawableResize:size];
+    [[self currentRenderer] drawableResize:size];
 }
 
 - (void)pauseRendering {
+    _metalView.renderingPaused = YES;
     if (_displayLink) {
         _displayLink.paused = YES;
     }
-    if (_renderer) {
-        _renderer.isStopping = YES;
-    }
+    [self currentRenderer].isStopping = YES;
     Log(LOG_I, @"[MetalViewController] Rendering paused");
 }
 
 - (void)resumeRendering {
-    if (_renderer) {
-        _renderer.isStopping = NO;
-    }
+    [self currentRenderer].isStopping = NO;
+    _metalView.renderingPaused = NO;
     if (_displayLink) {
         _displayLink.paused = NO;
     }
@@ -185,9 +225,9 @@
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
 
-    Log(LOG_I, @"[MetalViewController] viewDidDisappear");
-
-    [self shutdown];
+    // Appearance follows the phone's parent controller, while the Metal view
+    // can be presenting in a different window. Only the owning stream session
+    // decides when to permanently shut down its renderer.
 }
 
 - (void)shutdown {
@@ -199,10 +239,12 @@
     // Stop the renderer before the render thread: isStopping makes the thread's
     // renderFrame return early, so it can't enter the dispatch_sync-to-main path
     // while we wait for it below.
-    if (_renderer) {
-        [_renderer shutdown];
+    MetalVideoRenderer *renderer;
+    @synchronized (self) {
+        renderer = _renderer;
         _renderer = nil;
     }
+    [renderer shutdown];
 
     if (_metalView) {
         _metalView.delegate = nil;

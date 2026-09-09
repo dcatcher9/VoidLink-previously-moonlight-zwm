@@ -14,22 +14,35 @@
 #import "MainFrameViewController.h"
 #import "VideoDecoderRenderer.h"
 #import "StreamManager.h"
+#import "ConnectionLifecycle.h"
+#import "SunlightPlatform.h"
 #import "SceneDelegate.h"
 #import "ControllerSupport.h"
 #import "DataManager.h"
 #import "PaddedLabel.h"
 #import "ImGuiRenderer.h"
 #import "MetalVideoRenderer.h"
-#import "CustomEdgeSlideGestureRecognizer.h"
 #import "CustomTapGestureRecognizer.h"
 #import "LocalizationHelper.h"
 #import "VoidLink-Swift.h"
 #import "NativeTouchPointer.h"
+#if !TARGET_OS_TV
+#import "ExternalDisplayCoordinator.h"
+#import "SunlightGlassesModePolicy.h"
+#import "SunlightStreamQualityProfile.h"
+#import "SunlightStreamQualitySession.h"
+#import "SunlightInputDispatch.h"
+#import "SunlightNativeResolution.h"
+#import "SunlightMachineControlsSettings.h"
+#import "SunlightStreamControlsView.h"
+#import "SunlightControlPadView.h"
+#endif
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <math.h>
 #include <Limelight.h>
 
 #if TARGET_OS_TV
@@ -47,10 +60,6 @@
 
 static NSString* VLTerminationHintForErrorCode(int errorCode) {
     switch (errorCode) {
-        case ML_ERROR_CONTROL_DISCONNECT_TIMEOUT:
-            return @"Timeout type: control disconnect timeout.\nThe control stream started disconnecting, but the final disconnect event never arrived before the timeout expired.";
-        case ML_ERROR_CONTROL_UNEXPECTED_DISCONNECT:
-            return @"Timeout type: enet peer timeout disconnect / unexpected control stream disconnect.\nThe established control stream was dropped by ENet or the host/network unexpectedly.";
         case -1:
             return @"Possible causes:\n- control disconnect timeout\n- enet peer timeout disconnect\n- unexpected control stream disconnect\n- video receive socket failure\n- audio receive socket failure\n- input send socket failure\n- control message send/ack failure\n- loss stats/control buffer malloc failure\n- video buffer malloc failure\n- audio packet malloc failure\n- unknown socket failure";
         case ETIMEDOUT:
@@ -77,7 +86,7 @@ static NSString* VLTerminationHintForErrorCode(int errorCode) {
 }
 
 
-@interface StreamFrameViewController () <ToolboxSpecialEntryDelegate, OnScreenFunctionalWidgetDelegate, AbstractGamepadOverlayCloseButtonDelegate>
+@interface StreamFrameViewController () <ToolboxSpecialEntryDelegate, OnScreenFunctionalWidgetDelegate, AbstractGamepadOverlayCloseButtonDelegate, UIAdaptivePresentationControllerDelegate>
 @end
 
 static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil;
@@ -102,12 +111,18 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     BOOL _userIsInteracting;
     bool viewIsBeingResized;
     bool previousOnScreenWidgetEnabled;
-    CGSize _keyboardSize;
     PlotMetrics _decodeMetrics;
     PlotMetrics _frameDropMetrics;
     PlotMetrics _frameQueueMetrics;
-    UIWindow *_extWindow;
     UIView *_streamVideoRenderView;
+    UIView *_externalDisplayRenderViewRequest;
+    __weak UIView *_lastRoutedRenderView;
+    __weak UIWindow *_lastRenderWindow;
+    CGRect _lastRenderBounds;
+    BOOL _lastRenderWasExternal;
+    BOOL _externalDisplayRoutingReady;
+    BOOL _isUpdatingExternalDisplayRouting;
+    BOOL _isEndingStream;
     /*
      * View architecture of this viewController:
      * self.view (named `streamFrameTopLayerView` in StreamView.m, where slide & tap gestures, and onScreenControls & OnScreenWidgetView buttons are registered)
@@ -121,12 +136,20 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     SafeTimer* safeTimer;
 
 #if !TARGET_OS_TV
-    CustomEdgeSlideGestureRecognizer *_slideToSettingsRecognizer;
-    CustomEdgeSlideGestureRecognizer *_slideToToolboxRecognizer;
+    SunlightStreamControlsView *_streamControls;
+    SunlightControlPadView *_controlPad;
+    CommandExecutionOwner *_commandOwner;
+    BOOL _hostInputReady;
+    BOOL _automatic2DReconnectPending;
+    SunlightStreamQualitySession *_qualitySession;
+    BOOL _streamUIObserversInstalled;
+    BOOL _preferSessionTrackpad;
     CustomTapGestureRecognizer *_oscLayoutTapRecoginizer;
     LayoutOnScreenControlsViewController *_layoutOnScreenControlsVC;
     ToolboxViewController* toolBoxViewController;
     MicHandler* micHandler;
+    NSUInteger _microphoneGeneration;
+    BOOL _microphoneCaptureStopped;
     MotionHandler *_motionHandler;
 
     
@@ -141,6 +164,316 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 + (StreamFrameViewController *)sharedInstance {
     return VLSharedStreamFrameViewController;
 }
+
+#if !TARGET_OS_TV
+- (SunlightMachineControlsSettings *)globalMachineControls {
+    TemporarySettings *saved = [[[DataManager alloc] init] getSettings];
+    SunlightMachineControlsSettings *controls = [[SunlightMachineControlsSettings alloc] init];
+    id trackpad = [NSUserDefaults.standardUserDefaults objectForKey:@"sunlight.preferTrackpad"];
+    BOOL preferTrackpad = ![trackpad isKindOfClass:NSNumber.class] || [trackpad boolValue];
+    controls.controlMode = preferTrackpad ? SunlightMachineControlModeTrackpad : SunlightMachineControlModeSavedTouchProfile;
+    controls.localVolume = saved.localVolume ? saved.localVolume.doubleValue : 1;
+    controls.statsOverlayLevel = saved.statsOverlayEnabled ? MIN(2, MAX(1, saved.statsOverlayLevel.integerValue)) : 0;
+    return [SunlightMachineControlsSettings globalControlsWithDefaults:NSUserDefaults.standardUserDefaults fallback:controls];
+}
+
+- (SunlightMachineControlsSettings *)resolvedMachineControls {
+    if (!self.streamConfig.machineControls) {
+        self.streamConfig.machineControls = [SunlightMachineControlsSettings settingsForHostUUID:self.streamConfig.hostUUID
+            defaults:NSUserDefaults.standardUserDefaults globalDefaults:[self globalMachineControls]];
+    }
+    return self.streamConfig.machineControls;
+}
+
+- (void)setupStreamControls {
+    if (_streamControls) return;
+    _qualitySession = [[SunlightStreamQualitySession alloc] initWithConfiguration:self.streamConfig
+        defaults:NSUserDefaults.standardUserDefaults fallback:[self globalQualityDefaults]
+        nativeSize:SunlightNativeLandscapeSize() drafts:self.initialQualityDrafts resetModes:self.initialQualityResetModes];
+    self.initialQualityDrafts = nil;
+    self.initialQualityResetModes = nil;
+    SunlightMachineControlsSettings *machine = [self resolvedMachineControls];
+    _preferSessionTrackpad = machine.controlMode == SunlightMachineControlModeTrackpad;
+    _touchDisabled = !machine.touchEnabled;
+    _controlPad = [[SunlightControlPadView alloc] initWithFrame:CGRectZero];
+    _controlPad.hidden = YES;
+    [self.view addSubview:_controlPad];
+    _streamControls = [[SunlightStreamControlsView alloc] initWithFrame:self.view.bounds];
+    _streamControls.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _streamControls.glasses3DAvailable = [self isAirPlayEnabled] &&
+        [ExternalDisplayCoordinator sharedCoordinator].displayMode == SunlightExternalDisplayMode3D;
+    _streamControls.activeMode = self.streamConfig.streamMode;
+    _streamControls.controlPadEnabled = machine.controlMode == SunlightMachineControlModeGamepad;
+    _streamControls.appName = self.streamConfig.appName ?: @"";
+    [self.view addSubview:_streamControls];
+    __weak typeof(self) weakSelf = self;
+    _commandOwner = [[CommandExecutionOwner alloc] initWithCanSend:^BOOL{
+        typeof(self) self = weakSelf;
+        return self && self->_hostInputReady && !self->_isEndingStream;
+    }];
+    _streamControls.expansionChangedHandler = ^(BOOL expanded) {
+        typeof(self) self = weakSelf; if (!self) return;
+        [self->_controlPad releaseAllControls];
+        [self updateStreamControls];
+    };
+    _streamControls.actionHandler = ^(SunlightStreamControlsAction action) {
+        [weakSelf handleStreamControlAction:action];
+    };
+    _streamControls.qualityChangedHandler = ^(int width, int height, int fps, int bitrate) {
+        [weakSelf stageStreamQualityWidth:width height:height frameRate:fps bitRate:bitrate];
+    };
+    _streamControls.modeApplyHandler = ^(SunlightStreamMode mode) {
+        [weakSelf reconnectWithStreamMode:mode];
+    };
+    _streamControls.selectionChangedHandler = ^{
+        [weakSelf updateStreamControls];
+    };
+    _streamControls.pendingChangesDiscardedHandler = ^{
+        typeof(self) self = weakSelf; if (!self) return;
+        [self->_qualitySession discardPendingChanges];
+        [self updateStreamControls];
+    };
+    _controlPad.buttonChangedHandler = ^(int flag, BOOL down) {
+        typeof(self) self = weakSelf;
+        if (!self || ![self canSendControlPadInput]) return;
+        VoidController *controller = [self->_controllerSupport getOscController];
+        if (down) [self->_controllerSupport setButtonFlag:controller flags:flag];
+        else [self->_controllerSupport clearButtonFlag:controller flags:flag];
+        [self->_controllerSupport updateFinished:controller];
+    };
+    _controlPad.leftStickChangedHandler = ^(CGPoint value) { [weakSelf sendControlPadStick:value right:NO]; };
+    _controlPad.rightStickChangedHandler = ^(CGPoint value) { [weakSelf sendControlPadStick:value right:YES]; };
+    _controlPad.leftTriggerChangedHandler = ^(float value) { [weakSelf sendControlPadTrigger:value right:NO]; };
+    _controlPad.rightTriggerChangedHandler = ^(float value) { [weakSelf sendControlPadTrigger:value right:YES]; };
+}
+
+- (BOOL)canSendControlPadInput {
+    return _hostInputReady && !_isEndingStream;
+}
+
+- (void)sendControlPadStick:(CGPoint)value right:(BOOL)right {
+    if (![self canSendControlPadInput]) return;
+    VoidController *controller = [_controllerSupport getOscController];
+    short x = (short)(fmax(-1, fmin(1, value.x)) * 32767);
+    short y = (short)(fmax(-1, fmin(1, value.y)) * 32767);
+    if (right) [_controllerSupport updateRightStick:controller x:x y:y];
+    else [_controllerSupport updateLeftStick:controller x:x y:y];
+    [_controllerSupport updateFinished:controller];
+}
+
+- (void)sendControlPadTrigger:(float)value right:(BOOL)right {
+    if (![self canSendControlPadInput]) return;
+    VoidController *controller = [_controllerSupport getOscController];
+    unsigned char position = (unsigned char)(fmaxf(0, fminf(1, value)) * 255);
+    if (right) [_controllerSupport updateRightTrigger:controller right:position];
+    else [_controllerSupport updateLeftTrigger:controller left:position];
+    [_controllerSupport updateFinished:controller];
+}
+
+- (void)updateStreamControls {
+    if (!_streamControls || _isEndingStream) return;
+    BOOL external = [self isAirPlaying];
+    BOOL expanded = _streamControls.isExpanded;
+    BOOL pad = _streamControls.controlPadEnabled;
+    ExternalDisplayCoordinator *display = [ExternalDisplayCoordinator sharedCoordinator];
+    _streamControls.externalOutputActive = external;
+    _streamControls.glasses3DAvailable = [self isAirPlayEnabled] && display.displayMode == SunlightExternalDisplayMode3D;
+    _streamControls.connectionReady = _hostInputReady;
+    _streamControls.touchEnabled = !_touchDisabled;
+    _streamControls.usesSavedTouchProfile = !_preferSessionTrackpad;
+    StreamConfiguration *quality = [self qualityConfigurationForMode:_streamControls.selectedMode includingPending:YES];
+    _streamControls.qualityChangesPending = [_qualitySession hasPendingChangesForMode:_streamControls.selectedMode];
+    _streamControls.qualityWidth = quality.width;
+    _streamControls.qualityHeight = quality.height;
+    _streamControls.qualityUsesNativeResolution =
+        [self qualityProfileForMode:_streamControls.selectedMode includingPending:YES].usesNativeResolution;
+    _streamControls.qualityFrameRate = quality.frameRate;
+    _streamControls.qualityBitrateKbps = quality.bitRate;
+    _streamControls.qualityResolutionLocked = quality.isRawSbsStream;
+    _streamControls.qualityMaxFrameRate = quality.streamMode != SunlightStreamMode2D || self.streamConfig.glassesOutputEnabled ? 60 : 240;
+    _streamControls.inputHint = _preferSessionTrackpad
+        ? NSLocalizedString(@"Slide to move · Tap to click\nTwo-finger tap to right-click · Two fingers to scroll", nil)
+        : [self savedTouchProfileSummary];
+    NSString *outputDescription = NSLocalizedString(@"This display", nil);
+    if (external) {
+        outputDescription = display.displayMode == SunlightExternalDisplayMode3D
+            ? NSLocalizedString(@"Glasses in 3D mode", nil)
+            : display.displayMode == SunlightExternalDisplayMode2D
+                ? NSLocalizedString(@"Glasses in 2D mode", nil) : NSLocalizedString(@"Glasses switching mode…", nil);
+    }
+    _streamControls.statusText = _hostInputReady
+        ? [NSString stringWithFormat:NSLocalizedString(@"%@ · %@", nil), self.streamConfig.appName ?: @"PC", outputDescription]
+        : NSLocalizedString(@"Connecting to your PC…", nil);
+    [_streamView setLocalControlsPresented:expanded];
+    [_streamView setSessionTrackpadOverrideEnabled:_preferSessionTrackpad];
+    [_streamView toggleTouchDisabled:_touchDisabled];
+    [self updateScrollViewInteractionState];
+    [_controllerSupport setLocalControlPadEnabled:pad];
+    _controlPad.hidden = !pad || expanded || !_hostInputReady || _touchDisabled;
+    [self streamContentContainerView].userInteractionEnabled = !expanded && !pad;
+    _streamView.accessibilityElementsHidden = expanded;
+    if (external || pad) {
+        [_streamView disableOnScreenControls];
+        [_streamView clearOnScreenWidgets];
+    }
+    // Local controls live on the phone even when the sole video renderer moves
+    // to the external display. No second decoded-frame consumer is introduced.
+    [self.view bringSubviewToFront:_controlPad];
+    [self.view bringSubviewToFront:_streamControls];
+    [self.view setNeedsLayout];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [_streamControls layoutIfNeeded];
+    _controlPad.frame = _streamControls.controlPadLayoutGuide.layoutFrame;
+}
+
+- (void)openStreamControls {
+    _streamControls.expanded = YES;
+    [self updateStreamControls];
+}
+
+- (void)showStreamControlMessage:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"Picture settings", nil) message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OK", nil) style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (BOOL)canReconnectWithMode:(SunlightStreamMode)mode {
+    if (!_hostInputReady || _isEndingStream || _automatic2DReconnectPending) return NO;
+    if (mode != SunlightStreamMode2D &&
+        (![self isAirPlayEnabled] || [ExternalDisplayCoordinator sharedCoordinator].displayMode != SunlightExternalDisplayMode3D)) {
+        [self showStreamControlMessage:NSLocalizedString(@"Switch your glasses to 3D mode before choosing a 3D picture.", nil)];
+        return NO;
+    }
+    if (mode == SunlightStreamModeHost3D && !self.streamConfig.hostSessionIdSupported) {
+        [self showStreamControlMessage:NSLocalizedString(@"3D conversion needs Sunshine 3D on your PC.", nil)];
+        return NO;
+    }
+    return YES;
+}
+
+- (void)reconcileGlassesStreamMode {
+    // A mode switch may briefly remove the external scene or report new screen
+    // pixels before its canvas has caught up. Only a confirmed normal output
+    // requires a transport change; entering SBS never opts into 3D conversion.
+    ExternalDisplayCoordinator *display = [ExternalDisplayCoordinator sharedCoordinator];
+    if (_automatic2DReconnectPending || !SunlightShouldReturnTo2D(self.streamConfig.streamMode,
+        display.displayMode, [self isAirPlayEnabled], _hostInputReady, _isEndingStream)) return;
+    _automatic2DReconnectPending = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self) return;
+        void (^reconnectIfStillNeeded)(void) = ^{
+            self->_automatic2DReconnectPending = NO;
+            ExternalDisplayCoordinator *current = [ExternalDisplayCoordinator sharedCoordinator];
+            if (!SunlightShouldReturnTo2D(self.streamConfig.streamMode, current.displayMode,
+                [self isAirPlayEnabled], self->_hostInputReady, self->_isEndingStream)) return;
+            CGSize pixels = current.outputPixelSize;
+            Log(LOG_I, @"Glasses returned to normal %.0fx%.0f output; reconnecting the current PC app in 2D", pixels.width, pixels.height);
+            [self->_streamControls discardPendingChanges];
+            self->_streamControls.expanded = NO;
+            [self reconnectWithStreamMode:SunlightStreamMode2D];
+        };
+        if (self.presentedViewController && !self->_isEndingStream) {
+            [self dismissViewControllerAnimated:NO completion:reconnectIfStillNeeded];
+        } else {
+            reconnectIfStillNeeded();
+        }
+    });
+}
+
+- (void)reconnectWithStreamMode:(SunlightStreamMode)mode {
+    if (![self canReconnectWithMode:mode]) return;
+    SunlightStreamQualityProfile *qualityDraft = _qualitySession.drafts[@(mode)];
+    BOOL resetQuality = [_qualitySession.resetModes containsObject:@(mode)];
+    if (qualityDraft && !resetQuality && !qualityDraft.isValid) {
+        [self showStreamControlMessage:NSLocalizedString(@"These quality values are unsupported. Review this tab’s stream quality before reconnecting.", nil)];
+        return;
+    }
+    if ((qualityDraft || resetQuality) &&
+        ([self.streamConfig.hostUUID stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length == 0 ||
+         [self.streamConfig.appID stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length == 0)) {
+        [self showStreamControlMessage:NSLocalizedString(@"This app’s identity is missing. Return to the app list and connect again before saving picture settings.", nil)];
+        return;
+    }
+    NSMutableDictionary<NSNumber *, SunlightStreamQualityProfile *> *remainingDrafts = [_qualitySession.drafts mutableCopy];
+    NSMutableSet<NSNumber *> *remainingResets = [_qualitySession.resetModes mutableCopy];
+    [remainingDrafts removeObjectForKey:@(mode)];
+    [remainingResets removeObject:@(mode)];
+    BOOL (^commitReviewedQuality)(void) = [_qualitySession commitActionForMode:mode];
+    [_controlPad releaseAllControls];
+    if (![self.mainFrameViewcontroller reconnectStreamFromController:self mode:mode
+        remainingQualityDrafts:remainingDrafts remainingQualityResets:remainingResets]) {
+        [self showStreamControlMessage:NSLocalizedString(@"This stream is no longer selected. Return to your PC’s app list and connect again.", nil)];
+    } else {
+        // The accepted reconnect queues its replacement on the main thread.
+        // Save the reviewed draft now, before that replacement reads settings.
+        commitReviewedQuality();
+    }
+}
+
+- (SunlightStreamQualityProfile *)qualityProfileForMode:(SunlightStreamMode)mode includingPending:(BOOL)includingPending {
+    _qualitySession.outputSize = [ExternalDisplayCoordinator sharedCoordinator].outputPixelSize;
+    return [_qualitySession profileForMode:mode includingPending:includingPending];
+}
+
+- (SunlightStreamQualityProfile *)globalQualityDefaults {
+    TemporarySettings *saved = [[[DataManager alloc] init] getSettings];
+    SunlightStreamQualityProfile *quality = [[SunlightStreamQualityProfile alloc] init];
+    quality.width = saved.width.intValue; quality.height = saved.height.intValue;
+    quality.frameRate = saved.framerate.intValue; quality.bitRate = saved.bitrate.intValue;
+    quality.usesNativeResolution = saved.resolutionSelected.integerValue == 4;
+    return quality;
+}
+
+- (void)useGlobalQualityDefaults {
+    if (_streamControls.selectedTab == SunlightStreamControlsTabClient3D) return;
+    _qualitySession.outputSize = [ExternalDisplayCoordinator sharedCoordinator].outputPixelSize;
+    [_qualitySession restoreDefaultsForMode:_streamControls.selectedMode globalFallback:[self globalQualityDefaults]];
+    [self updateStreamControls];
+}
+
+- (StreamConfiguration *)qualityConfigurationForMode:(SunlightStreamMode)mode includingPending:(BOOL)includingPending {
+    _qualitySession.outputSize = [ExternalDisplayCoordinator sharedCoordinator].outputPixelSize;
+    return [_qualitySession configurationForMode:mode includingPending:includingPending];
+}
+
+- (void)stageStreamQualityWidth:(int)width height:(int)height frameRate:(int)fps bitRate:(int)bitrate {
+    if (_streamControls.selectedTab == SunlightStreamControlsTabClient3D || !_hostInputReady ||
+        _isEndingStream || _automatic2DReconnectPending) return;
+    _qualitySession.outputSize = [ExternalDisplayCoordinator sharedCoordinator].outputPixelSize;
+    [_qualitySession stageWidth:width height:height frameRate:fps bitRate:bitrate
+        usesNativeResolution:_streamControls.qualityUsesNativeResolution forMode:_streamControls.selectedMode];
+    [self updateStreamControls];
+}
+
+- (NSString *)savedTouchProfileSummary {
+    NSString *behavior;
+    switch (_oscProfile.touchMode) {
+        case RelativeTouch: behavior = NSLocalizedString(@"Trackpad", nil); break;
+        case AbsoluteTouch: behavior = NSLocalizedString(@"Direct mouse", nil); break;
+        case NativeTouch:
+        case NativeTouchOnly: behavior = NSLocalizedString(@"Touchscreen", nil); break;
+        case TouchDisabled: behavior = NSLocalizedString(@"Touch off", nil); break;
+        default: behavior = NSLocalizedString(@"Custom touch", nil); break;
+    }
+    return [NSString stringWithFormat:@"%@ · %@", _oscProfile.name ?: NSLocalizedString(@"Saved profile", nil), behavior];
+}
+
+- (void)handleStreamControlAction:(SunlightStreamControlsAction)action {
+    if (_isEndingStream) return;
+    switch (action) {
+        case SunlightStreamControlsActionModeDefaults: [self useGlobalQualityDefaults]; break;
+        case SunlightStreamControlsActionDisconnect: [self returnToMainFrame]; break;
+    }
+}
+#else
+- (void)setupStreamControls {}
+- (void)updateStreamControls {}
+#endif
 
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
     _streamView.hidden = YES;
@@ -318,10 +651,12 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)bringUpToolboxMenuWithoutWidgetLayoutTool:(BOOL)hideWidgetLayoutToolEntry{
+    [self openStreamControls];
     [self prepareGameProfileSelector];
     ToolboxViewController* oldToolboxVC = toolBoxViewController;
     toolBoxViewController = [[ToolboxViewController alloc] init];
     toolBoxViewController.specialEntryDelegate = self;
+    toolBoxViewController.commandOwner = _commandOwner;
     toolBoxViewController.specialEntries = [oldToolboxVC.specialEntries mutableCopy];
     if(hideWidgetLayoutToolEntry) [toolBoxViewController.specialEntries removeObject:@"widgetLayoutTool"];
     toolBoxViewController.modalPresentationStyle = UIModalPresentationOverCurrentContext;
@@ -333,40 +668,6 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     else [self presentViewController:toolBoxViewController animated:YES completion:^{}];
 }
 
-- (void)configGestures{
-    _slideToSettingsRecognizer = [[CustomEdgeSlideGestureRecognizer alloc] initWithTarget:self action:@selector(edgeSwiped)];
-    _slideToSettingsRecognizer.excludePencilEvent = _oscProfile.disablePencilSlideGestures;
-    _slideToSettingsRecognizer.edgeTolerance = _settings.edgeSlidingSensitivity.floatValue;
-    _slideToSettingsRecognizer.edges = _settings.slideToSettingsScreenEdge.intValue;
-    _slideToSettingsRecognizer.normalizedThresholdDistance = _settings.slideToSettingsDistance.floatValue;
-    _slideToSettingsRecognizer.delaysTouchesBegan = NO;
-    _slideToSettingsRecognizer.delaysTouchesEnded = NO;
-    [self.view addGestureRecognizer:_slideToSettingsRecognizer];
-    
-    
-    _slideToToolboxRecognizer = [[CustomEdgeSlideGestureRecognizer alloc] initWithTarget:self action:@selector(bringUpToolboxMenu)];
-    _slideToToolboxRecognizer.excludePencilEvent = _oscProfile.disablePencilSlideGestures;
-    _slideToToolboxRecognizer.edgeTolerance = _settings.edgeSlidingSensitivity.floatValue;
-    if(_settings.slideToSettingsScreenEdge.intValue == UIRectEdgeLeft) _slideToToolboxRecognizer.edges = UIRectEdgeRight;
-    else _slideToToolboxRecognizer.edges = UIRectEdgeLeft;  // _commandManager triggered by sliding from another side.
-    _slideToToolboxRecognizer.normalizedThresholdDistance = _settings.slideToSettingsDistance.floatValue;
-    _slideToToolboxRecognizer.delaysTouchesBegan = NO;
-    _slideToToolboxRecognizer.delaysTouchesEnded = NO;
-    [self.view addGestureRecognizer:_slideToToolboxRecognizer];
-    
-    /*
-    if([self isOnScreenWidgetEnabled]){
-        _oscLayoutTapRecoginizer = [[CustomTapGestureRecognizer alloc] initWithTarget:self action:@selector(handleWidgetLayoutGesture)];
-        _oscLayoutTapRecoginizer.numberOfTouchesRequired = _settings.oscLayoutToolFingers.intValue; //tap a predefined number of fingers to open osc layout tool
-        _oscLayoutTapRecoginizer.tapDownTimeThreshold = 0.2;
-        _oscLayoutTapRecoginizer.delaysTouchesBegan = NO;
-        _oscLayoutTapRecoginizer.delaysTouchesEnded = NO;
-        if(_settings.touchMode.intValue == AbsoluteTouch) _oscLayoutTapRecoginizer.immediateTriggering = true; // make immediate triggering on for absolute touch mode
-        [self.view addGestureRecognizer:_oscLayoutTapRecoginizer];
-        _oscLayoutTapRecoginizer.touchCapturingView = _streamView;
-    }
-    */
-}
 
 - (BOOL)currentProfileContainsMagnifierWidget {
     OSCProfilesManager *profileManager = [OSCProfilesManager sharedManager:CGRectZero];
@@ -445,6 +746,10 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     }
 
     BOOL interactionEnabled = _magnifierViewportInteractionActive;
+#if !TARGET_OS_TV
+    // Trackpad two-finger motion scrolls the PC, not the phone video viewport.
+    interactionEnabled = interactionEnabled && !_preferSessionTrackpad;
+#endif
     if (@available(iOS 17.0, *)) {
         _scrollView.allowsKeyboardScrolling = false;
     }
@@ -565,6 +870,42 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     [self reConfigStreamViewRealtimeAndReloadSettings:YES reloadOnscreenWidgets:NO];
 }
 
+- (TemporarySettings *)effectivePresentationSettings {
+    TemporarySettings *settings = [[[DataManager alloc] init] getSettings];
+    TemporarySettings *snapshot = self.streamConfig.presentationSettings;
+    if (snapshot) {
+        settings.renderingBackend = snapshot.renderingBackend;
+        settings.framePacingMode = snapshot.framePacingMode;
+        settings.asyncFrameDequeue = snapshot.asyncFrameDequeue;
+        settings.frameQueueSize = snapshot.frameQueueSize;
+        settings.enableHdr = snapshot.enableHdr;
+        settings.fullColorRange = snapshot.fullColorRange;
+        settings.preferredCodec = snapshot.preferredCodec;
+        settings.enableYUV444 = snapshot.enableYUV444;
+        settings.enablePIP = snapshot.enablePIP;
+        settings.sdrPerformanceWorkaround = snapshot.sdrPerformanceWorkaround;
+        settings.audioConfig = snapshot.audioConfig;
+        settings.playAudioOnPC = snapshot.playAudioOnPC;
+        settings.framerate = @(self.streamConfig.frameRate);
+    }
+    if (self.streamConfig.requiresMetalPresentation) {
+        settings.renderingBackend = @(RENDER_METAL);
+        settings.framePacingMode = @(FramePacingModeQueue);
+        settings.enableHdr = NO;
+        settings.enablePIP = NO;
+        settings.sdrPerformanceWorkaround = NO;
+        settings.framerate = @(self.streamConfig.frameRate);
+        settings.enableYUV444 = NO;
+    }
+#if !TARGET_OS_TV
+    SunlightMachineControlsSettings *machine = [self resolvedMachineControls];
+    settings.localVolume = @(machine.localVolume);
+    settings.statsOverlayLevel = @(machine.statsOverlayLevel);
+    settings.statsOverlayEnabled = machine.statsOverlayEnabled;
+#endif
+    return settings;
+}
+
 // key implementation of reconfiguring streamview after realtime setting menu is closed.
 - (void)reConfigStreamViewRealtimeAndReloadSettings:(BOOL)reloadSettings reloadOnscreenWidgets:(BOOL)reloadOnscreenWidgets{
     //[self.view removeGestureRecognizer:]
@@ -577,25 +918,40 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     }
     
     if (reloadSettings) {
-        _settings = [[[DataManager alloc] init] getSettings];  //StreamFrameViewController retrieve the settings here.
+        _settings = [self effectivePresentationSettings];
     }
     _oscProfile = [[OSCProfilesManager sharedManager:CGRectZero] getSelectedProfile];
     
-    overlayLevel = _settings.statsOverlayLevel.intValue;
+    // A hidden overlay keeps its last detail level for the keyboard shortcut.
+    overlayLevel = _settings.statsOverlayLevel.intValue > 0
+        ? _settings.statsOverlayLevel.intValue : MAX(1, overlayLevel);
     [self setupOverlayView];
     
     if(viewIsBeingResized) viewIsBeingResized = false;
     else [self prepareGameProfileSelector];
     [self updateToolboxSpecialEntries];
-    [self configGestures];
     [self configZoomGestureAndAddStreamView];
     [self->_streamView disableOnScreenControls]; //don't know why but this must be called outside the streamview class, just put it here. execute in streamview class cause hang
-    [self.mainFrameViewcontroller reloadStreamConfig]; // reload streamconfig
-    
-    if([MicHandler permissionGranted] && _settings.redirectMic){
-        [micHandler startTapping];
+    // Refresh only live input behavior. The active mode, quality and codec
+    // remain frozen until this mode tab's explicit reconnect (or a confirmed
+    // glasses downgrade); a gesture/settings refresh cannot renegotiate them.
+    self.streamConfig.swapABXYButtons = _settings.swapABXYButtons;
+    self.streamConfig.buttonVisualFeedback = _settings.buttonVisualFeedback;
+    self.streamConfig.asyncNativeTouchPriority = _settings.asyncNativeTouchPriority.boolValue;
+    self.streamConfig.gyroMode = _settings.gyroMode.intValue;
+    self.streamConfig.emulatedControllerType = _settings.emulatedControllerType.intValue;
+    self.streamConfig.hapticEngine = _settings.hapticEngine.intValue;
+    self.streamConfig.multiController = _settings.multiController;
+    self.streamConfig.localMousePointerMode = _settings.localMousePointerMode.intValue;
+    self.streamConfig.redirectMic = _settings.redirectMic;
+
+    @synchronized (self) {
+        if (!_microphoneCaptureStopped && _micStreamInitialized &&
+            [MicHandler permissionGranted] && _settings.redirectMic) {
+            [micHandler startTapping];
+        }
+        else [micHandler stopTappingWithStopEngine:false];
     }
-    else [micHandler stopTappingWithStopEngine:false];
     
     Connection.muteInBackground = _settings.muteInBackground;
     
@@ -648,7 +1004,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 
     // Ensure views are layered correctly
     // Metal view should be at the bottom for video rendering
-    if (self.metalViewController && self.metalViewController.view.superview) {
+    if (self.metalViewController && self.metalViewController.view.superview == self.view) {
         [self.view sendSubviewToBack:self.metalViewController.view];
     }
     // StreamView should also be at the back so OSC CALayers on self.view show
@@ -691,16 +1047,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
         ControllerNavigator.streamingRadialMenuDelay = (NSTimeInterval)_settings.streamingRadialMenuDelay.floatValue;
     }
 
+    [self updateStreamControls];
     NSLog(@"frameview gestures: %d", (uint32_t)[self.view.gestureRecognizers count]);
     NSLog(@"streamview gestures: %d", (uint32_t)[_streamView.gestureRecognizers count]);
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    // if(_settings.sendDummyEvent) [self startTimer];
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
 }
 
 - (void)viewDidAppear:(BOOL)animated
@@ -709,46 +1058,12 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     _viewJustLoaded = false;
     _deviceWindow = self.view.window;
     previousOnScreenWidgetEnabled = [_streamView isOnScreenWidgetEnabled];
-    if (@available(iOS 13.0, *)) {
-        UIScreen *currentScreen = self.view.window.windowScene.screen;
-        if (UIScreen.screens.count > 1 && [self isAirPlayEnabled] && currentScreen == UIScreen.mainScreen) {
-            [SceneDelegate setExternalDisplayRenderView:self->_streamVideoRenderView];
-        }
-        else {
-            /*
-             _settings.externalDisplayMode.intValue:
-             0 - stage manager
-             1 - airplay
-             2 - disabled
-             */
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self->_streamView insertSubview:self->_streamVideoRenderView atIndex:0];
-            });
-        }
-    } else {
-        [self->_streamView insertSubview:self->_streamVideoRenderView atIndex:0];
-        // Fallback on earlier versions
-    }
+    // Both renderer creation and the device window must be ready before routing.
+    _externalDisplayRoutingReady = !_isEndingStream;
+    [self reloadAirPlayConfig];
 
     self->_streamView.originalFrame = self->_streamView.frame;
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSLog(@"pausing...");
-        nil;
-    });
-    
-    // check to see if external screen is connected/disconnected
-
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(extScreenDidConnect:)
-                                                 name: UIScreenDidConnectNotification
-                                               object: nil];
-
-    [[NSNotificationCenter defaultCenter] addObserver: self
-                                             selector: @selector(extScreenDidDisconnect:)
-                                                 name: UIScreenDidDisconnectNotification
-                                               object: nil];
-   
 #if !TARGET_OS_TV
     [[self revealViewController] setPrimaryViewController:self];
     
@@ -756,6 +1071,8 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     
     GenericUtils.pencilInStreaming = false;
     
+    if (!_streamUIObserversInstalled) {
+        _streamUIObserversInstalled = YES;
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(updateContentOffsetAndScale:)
                                                  name:@"GameProfileSelectedNotification"
@@ -796,6 +1113,8 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
                                                  name:UIKeyboardDidHideNotification
                                                object:nil];
 
+    }
+
     [safeTimer start];
     
     #endif
@@ -826,28 +1145,8 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)popFirstStreamingTip {
-    // 初始化倒计时秒数
-    
-    NSString* settingsEdgeSide = _settings.slideToSettingsScreenEdge.intValue == UIRectEdgeLeft ? [LocalizationHelper localizedStringForKey:@"left"] : [LocalizationHelper localizedStringForKey:@"right"];
-    NSString* cmdToolEdgeSide = _settings.slideToSettingsScreenEdge.intValue == UIRectEdgeLeft ? [LocalizationHelper localizedStringForKey:@"right"] : [LocalizationHelper localizedStringForKey:@"left"];
-    uint8_t slideDist = (uint8_t)(_settings.slideToSettingsDistance.floatValue * 100);
-    // 创建弹窗
-    NSString* tipText = (PublicUtils.isRunningOnMacAsiPadApp
-    ? [LocalizationHelper localizedStringForKey:@"keyboard&MouseStreamingTip"]
-    : [LocalizationHelper localizedStringForKey:@"firstLaunchTip", settingsEdgeSide, slideDist, cmdToolEdgeSide, slideDist]);
-    
-    [AlertControllerUtil showAlertIn:self
-                                    title:[LocalizationHelper localizedStringForKey:@"First Launch Tips"]
-                                  message:tipText
-                               withCancel:NO
-                              buttonTitle:[LocalizationHelper localizedStringForKey:@"This tip won't be shown again"]
-                                countdown:16
-                                   action:^{}
-                               completion:^{
-        if(!PublicUtils.isRunningOnMacAsiPadApp && GenericUtils.isHardwareKeyboardConnected) [self popKeyboardAndMouseStreamingTip];
-    }];
-    
-    return;
+    // The persistent controls pill and contextual touch hint replace the timed
+    // first-launch alert that taught hidden edge gestures.
 }
 
 - (void)updateTheme {
@@ -867,12 +1166,13 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     _singleTouchDisabled = false;
     
     [super viewDidLoad];
+
     
     [self.navigationController setNavigationBarHidden:YES animated:YES];
     
     [UIApplication sharedApplication].idleTimerDisabled = YES;
     
-    _settings = [[[DataManager alloc] init] getSettings];  //StreamFrameViewController retrieve the settings here.
+    _settings = [self effectivePresentationSettings];
     
     _stageLabel = [[UILabel alloc] init];
     [_stageLabel setUserInteractionEnabled:NO];
@@ -916,11 +1216,21 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
      1 - airplay
      */
     // A separate render view is always created to support external displays.
-    _streamVideoRenderView = (StreamView*)[[UIView alloc] initWithFrame:self.view.frame];
+    _streamVideoRenderView = [[UIView alloc] initWithFrame:_streamView.bounds];
     _streamVideoRenderView.bounds = _streamView.bounds;
     _streamVideoRenderView.userInteractionEnabled = false;
+    _streamVideoRenderView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_streamView insertSubview:_streamVideoRenderView atIndex:0];
+
+    // Scene availability follows UIScreen connection asynchronously. Observe the
+    // coordinator after its window and render-view layout are ready instead.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(externalDisplayChanged:)
+                                                 name:@"SunlightExternalDisplayChanged"
+                                               object:nil];
     
     //[_streamView setupStreamView:_controllerSupport interactionDelegate:self config:self.streamConfig];
+    [self setupStreamControls];
     [self reConfigStreamViewRealtime]; // call this method again to make sure all gestures are configured & added to the superview(self.view), including the gestures added from inside the streamview.
     
     if([self isFirstStreaming] || GenericUtils.isFirstStreamingOnMac) [self popFirstStreamingTip];
@@ -992,6 +1302,10 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
                                              selector:@selector(handleStreamAspectRatioChanged:)
                                                  name:@"StreamAspectRatioChanged"
                                                object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(externalDisplayPreferenceChanged:)
+                                                 name:SunlightExternalDisplayPreferenceChangedNotification
+                                               object:nil];
 #if 0
     // FIXME: This doesn't work reliably on iPad for some reason. Showing and hiding the keyboard
     // several times in a row will not correctly restore the state of the UIScrollView.
@@ -1025,7 +1339,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
                                                                     framerate:[self->_settings.framerate floatValue]
                                                                      settings:self->_settings
                                                                metricsHandler:self.imguiView.metricsHandler];
+        self.metalViewController.streamMode = self.streamConfig.streamMode;
         self.metalViewController.view.userInteractionEnabled = NO;
+        self.metalViewController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self addChildViewController:self.metalViewController];
         // Insert Metal view at the bottom of the view hierarchy
         [self.view insertSubview:self.metalViewController.view atIndex:0];
@@ -1086,7 +1402,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)bringUpSoftKeyboard{
-    [self->_streamView readyToBringUpSoftKeyboardByToolbox];
+    _streamControls.expanded = NO;
+    [self updateStreamControls];
+    [self->_streamView showSoftKeyboard];
 }
 
 - (void)enterPip{
@@ -1211,6 +1529,12 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     NSNumber *aspectRatioNum = notification.userInfo[@"aspectRatio"];
     if (aspectRatioNum && _streamView) {
         CGFloat aspectRatio = [aspectRatioNum doubleValue];
+        if (self.streamConfig.streamMode == SunlightStreamModeHost3D) {
+            aspectRatio *= 0.5; // Phone preview shows one eye of the packed stream.
+        }
+        if (!isfinite(aspectRatio) || aspectRatio <= 0) {
+            return;
+        }
         Log(LOG_I, @"Updating StreamView aspect ratio to %.4f", aspectRatio);
         _streamView.streamAspectRatio = aspectRatio;
         _streamView.pencilHandler.streamAspectRatio = aspectRatio;
@@ -1242,18 +1566,21 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)willMoveToParentViewController:(UIViewController *)parent {
+    [super willMoveToParentViewController:parent];
     // Only cleanup when we're being destroyed
     if (parent == nil) {
+#if !TARGET_OS_TV
+        [_commandOwner cancelPendingCommands];
+        [_controlPad releaseAllControls];
+        _hostInputReady = NO;
+#endif
+        [self retireStreamPresentation];
         [_streamView cleanUp];
         _streamView = nil;
         [_controllerSupport cleanup];
 
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         [_streamMan stopStream];
-        if (_inactivityTimer != nil) {
-            [_inactivityTimer invalidate];
-            _inactivityTimer = nil;
-        }
         if (self.metalViewController) {
             // Explicit shutdown: viewDidDisappear is not guaranteed to fire here
             // (e.g. teardown while backgrounded), and it's what stops the render
@@ -1270,34 +1597,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
             [view removeFromSuperview];
         }
         
-        [safeTimer pause];
-        [safeTimer clean];
     }
 }
 
-#if 0
-- (void)keyboardWillShow:(NSNotification *)notification {
-    _keyboardSize = [[[notification userInfo] objectForKey:UIKeyboardFrameBeginUserInfoKey] CGRectValue].size;
-
-    [UIView animateWithDuration:0.3 animations:^{
-        CGRect frame = self->_scrollView.frame;
-        frame.size.height -= self->_keyboardSize.height;
-        self->_scrollView.frame = frame;
-    }];
-}
-
--(void)keyboardWillHide:(NSNotification *)notification {
-    // NOTE: UIKeyboardFrameEndUserInfoKey returns a different keyboard size
-    // than UIKeyboardFrameBeginUserInfoKey, so it's unsuitable for use here
-    // to undo the changes made by keyboardWillShow.
-    
-    [UIView animateWithDuration:0.3 animations:^{
-        CGRect frame = self->_scrollView.frame;
-        frame.size.height += self->_keyboardSize.height;
-        self->_scrollView.frame = frame;
-    }];
-}
-#endif
 
 - (void)updateStatsOverlay {
     if(!_settings.statsOverlayEnabled){
@@ -1354,6 +1656,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)updateOverlayText:(NSString*)text {
+    if (self->_isEndingStream) return;
     if (text != nil) {
         // We set our bounds to the maximum width in order to work around a bug where
         // sizeToFit interacts badly with the UITextView's line breaks, causing the
@@ -1384,6 +1687,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
         });
         return;
     }
+    if (_isEndingStream) return;
 
     if (text == nil) {
         _transientHUDView.hidden = YES;
@@ -1419,6 +1723,24 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)returnToMainFrame {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self returnToMainFrame];
+        });
+        return;
+    }
+    if (_isEndingStream) {
+        return;
+    }
+#if !TARGET_OS_TV
+    [_streamControls discardPendingChanges];
+    [_commandOwner cancelPendingCommands];
+    [_controlPad releaseAllControls];
+    _hostInputReady = NO;
+    [_streamView setHostInputConnected:NO];
+#endif
+    [self retireStreamPresentation];
+
     if (@available(iOS 13.0, *)) {
         // [ControllerNavigator setUINavigationDelegate:[_mainFrameViewcontroller isInAppView] ? _mainFrameViewcontroller : _mainFrameViewcontroller.hostCollectionVC];
         [ControllerNavigator restorePreviousUINavigationDelegateWithIfCurrentDelegateIs:self];
@@ -1440,69 +1762,86 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     
     [_streamView saveStreamingGameProfileChanges];
     [_streamView clearOnScreenWidgets];
-    if(micHandler) [micHandler clean];
     PencilHandler.shared = nil;
     
     // Reset display mode back to default
     [self updatePreferredDisplayMode:NO];
-    if (@available(iOS 13.0, *)) {
-        [SceneDelegate clearExternalDisplayRenderView];
-    }
     
     if (_settings.enablePIP) {
         [self cleanupPiPController];
     }
     
-    [_statsUpdateTimer invalidate];
-    _statsUpdateTimer = nil;
-    
     [self.navigationController popToRootViewControllerAnimated:NO];
     
-    _extWindow = nil;
-    
-    if(_streamConfig.redirectMic) [micHandler stopTappingWithStopEngine:true];
     
     self.mainFrameViewcontroller.settingsExpandedInStreamView = false; // reset this flag to false
         
     [ControllerUtil disableSysGestures: ControllerUtil.primaryGCController];
 }
 
-// External Screen connected
-- (void)extScreenDidConnect:(NSNotification *)notification {
-    Log(LOG_I, @"External Screen Connected");
-    if ([self isAirPlayEnabled] && [notification.object isKindOfClass:[UIScreen class]]) {
-        // UIScreen *extScreen = (UIScreen *)notification.object;
-        if (_streamVideoRenderView) {
-             // Remove from current superview before passing it
-             [_streamVideoRenderView removeFromSuperview];
-             if (@available(iOS 13.0, *)) {
-                 [SceneDelegate setExternalDisplayRenderView:_streamVideoRenderView];
-             }
-             NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
-             [nc postNotificationName:@"ScreenChanged" object:self];
-        } else {
-             Log(LOG_W, @"_streamVideoRenderView is nil when external screen connected.");
+- (UIView *)activeStreamRenderView {
+    // The Metal backend renders into its controller's view; the AVSB container
+    // remains present for the decoder but does not contain the Metal image.
+    return self.metalViewController ? self.metalViewController.view : _streamVideoRenderView;
+}
+
+- (void)externalDisplayChanged:(NSNotification *)notification {
+    [self reloadAirPlayConfig];
+}
+
+- (void)externalDisplayPreferenceChanged:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self externalDisplayPreferenceChanged:notification]; });
+        return;
+    }
+    NSNumber *mode = notification.userInfo[@"externalDisplayMode"];
+    if ([mode isKindOfClass:NSNumber.class] && mode.integerValue >= 0 && mode.integerValue <= 2) {
+        _settings.externalDisplayMode = mode;
+        [self reloadAirPlayConfig];
+    }
+}
+
+- (void)restoreStreamRenderViewToDevice:(UIView *)renderView {
+    UIView *deviceContainer = self.metalViewController ? self.view : _streamView;
+    if (renderView.superview != deviceContainer) {
+        [deviceContainer insertSubview:renderView atIndex:0];
+    }
+    renderView.frame = deviceContainer.bounds;
+    renderView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    if (self.metalViewController) {
+        // Preserve the existing local order: stream input surface, video, then
+        // the controls and HUD attached to the frame controller.
+        UIView *streamContainerView = [self streamContentContainerView];
+        if (streamContainerView.superview == self.view) {
+            [self.view sendSubviewToBack:streamContainerView];
         }
     }
 }
 
-// External Screen disconnected
-- (void)extScreenDidDisconnect:(NSNotification *)notification {
-    Log(LOG_I, @"External Screen Disconnected");
-    if(UIScreen.screens.count < 2) {
+- (void)retireStreamPresentation {
+    [self stopMicrophoneCapture];
+    _isEndingStream = YES;
+    [_statsUpdateTimer invalidate];
+    _statsUpdateTimer = nil;
+    [_inactivityTimer invalidate];
+    _inactivityTimer = nil;
+    [safeTimer clean];
+    safeTimer = nil;
+    if (_delayedRemoveExtScreen) {
+        dispatch_block_cancel(_delayedRemoveExtScreen);
+        _delayedRemoveExtScreen = nil;
+    }
+    _externalDisplayRoutingReady = NO;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:@"SunlightExternalDisplayChanged"
+                                                  object:nil];
+    if (_externalDisplayRenderViewRequest) {
+        UIView *retiringView = _externalDisplayRenderViewRequest;
+        _externalDisplayRenderViewRequest = nil;
         if (@available(iOS 13.0, *)) {
-            [SceneDelegate clearExternalDisplayRenderView];
+            [SceneDelegate clearExternalDisplayRenderView:retiringView];
         }
-        // Add the render view back to the local StreamView if AirPlay was active
-        if ([self isAirPlayEnabled]) {
-            if (_streamVideoRenderView && _streamView) {
-                [_streamView insertSubview:_streamVideoRenderView atIndex:0];
-                [self handleViewResize]; // Adjust frames as needed
-                [self reConfigStreamViewRealtimeAndReloadSettings:YES reloadOnscreenWidgets:YES];
-            }
-        }
-        NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
-        [nc postNotificationName:@"ScreenChanged" object:self]; // Your existing notification
     }
 }
 
@@ -1511,8 +1850,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (BOOL) isAirPlaying{
-    if (_settings.externalDisplayMode.intValue == 1 && _streamVideoRenderView) {
-        return _streamVideoRenderView.hidden;
+    if (@available(iOS 13.0, *)) {
+        UIView *renderView = [self activeStreamRenderView];
+        return renderView && [SceneDelegate isExternalDisplayRenderView:renderView];
     }
     return NO;
 }
@@ -1522,40 +1862,86 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void) reloadAirPlayConfig{
-    if (UIScreen.screens.count == 1){return;}
-    if (![self isAirPlaying] && [self isAirPlayEnabled]){
-        if (@available(iOS 13.0, *)) {
-            [SceneDelegate setExternalDisplayRenderView:_streamVideoRenderView];
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self reloadAirPlayConfig];
+        });
+        return;
+    }
+    if (!_externalDisplayRoutingReady || _isEndingStream || _isUpdatingExternalDisplayRouting) {
+        return;
+    }
+
+    UIView *renderView = [self activeStreamRenderView];
+    if (!renderView || !_streamView || !self.view.window) {
+        return;
+    }
+
+    _isUpdatingExternalDisplayRouting = YES;
+    if (@available(iOS 13.0, *)) {
+        if ([self isAirPlayEnabled]) {
+            _externalDisplayRenderViewRequest = renderView;
+            // The coordinator keeps this request pending until a scene exists.
+            // It alone moves the view off the device after the window is ready.
+            [SceneDelegate setExternalDisplayRenderView:renderView];
+        } else if (_externalDisplayRenderViewRequest) {
+            UIView *retiringView = _externalDisplayRenderViewRequest;
+            _externalDisplayRenderViewRequest = nil;
+            [SceneDelegate clearExternalDisplayRenderView:retiringView];
         }
-    }else if ([self isAirPlaying] && ![self isAirPlayEnabled]){
-        if (@available(iOS 13.0, *)) {
-            [SceneDelegate clearExternalDisplayRenderView];
-        }
+    }
+
+    BOOL isExternal = [self isAirPlaying];
+#if !TARGET_OS_TV
+    // Entering SBS changes only mono presentation. Leaving SBS also schedules
+    // a 2D transport reconnect below, once the new normal output is confirmed.
+    self.metalViewController.stereoOutputEnabled = isExternal &&
+        [ExternalDisplayCoordinator sharedCoordinator].displayMode == SunlightExternalDisplayMode3D;
+#endif
+    if (!isExternal) {
+        [self restoreStreamRenderViewToDevice:renderView];
+    }
+    [renderView setNeedsLayout];
+    [renderView layoutIfNeeded];
+
+    BOOL renderTargetChanged = _lastRoutedRenderView != renderView ||
+        _lastRenderWindow != renderView.window ||
+        !CGRectEqualToRect(_lastRenderBounds, renderView.bounds) ||
+        _lastRenderWasExternal != isExternal;
+    _lastRoutedRenderView = renderView;
+    _lastRenderWindow = renderView.window;
+    _lastRenderBounds = renderView.bounds;
+    _lastRenderWasExternal = isExternal;
+    _isUpdatingExternalDisplayRouting = NO;
+    [self updateStreamControls];
+#if !TARGET_OS_TV
+    [self reconcileGlassesStreamMode];
+#endif
+
+    if (renderTargetChanged && !self.metalViewController) {
+        // AVSB reinitialization resets decoder state, so only request it when
+        // the actual target changes, after the new window and bounds are set.
+        // Metal updates its drawable through its own view layout callbacks.
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ScreenChanged" object:self];
     }
 }
 
 - (void) handleViewResize{
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handleViewResize];
+        });
+        return;
+    }
+    if (_isEndingStream) {
+        return;
+    }
     viewIsBeingResized = true;
     
     _streamView.bounds = _deviceWindow.bounds;
     _streamView.frame = _deviceWindow.frame;
     
-    if(![self isAirPlaying]){
-        _streamVideoRenderView.bounds = _deviceWindow.bounds;
-        _streamVideoRenderView.frame = _deviceWindow.frame;
-
-        // Handle resize for meetal renderer
-        if ([_settings.renderingBackend intValue] == RENDER_METAL && self.metalViewController) {
-            self.metalViewController.view.frame = _deviceWindow.bounds;
-            [self.metalViewController.view setNeedsLayout];
-            [self.metalViewController.view layoutIfNeeded];
-            Log(LOG_I, @"Updated Metal view bounds after resize");
-        }
-        
-        // Handle resize for AVSB renderer
-        NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
-        [nc postNotificationName:@"ScreenChanged" object:self];
-    }
+    [self reloadAirPlayConfig];
 }
 
 
@@ -1599,6 +1985,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     }
     
     appDidEnterBackgroundWithoutPip = false;
+    [self->_streamMan.videoRenderer setDecodingPausedForBackground:NO];
     [_streamMan setNeedRequeuing:true];
     // dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC));
     // dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -1653,6 +2040,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
         }
     }
 
+    [self->_streamMan.videoRenderer setDecodingPausedForBackground:appDidEnterBackgroundWithoutPip];
     if (_inactivityTimer != nil) {
         [_inactivityTimer invalidate];
         _inactivityTimer = nil;
@@ -1672,8 +2060,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)expandSettingsView{
-    [_streamView saveStreamingGameProfileChanges];
-    [self.mainFrameViewcontroller expandSettingsView];
+    [self openStreamControls];
 }
 
 - (void)edgeSwiped{
@@ -1690,19 +2077,24 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     [self returnToMainFrame];
 }
 
-- (void)disconnectAndQuitApp{
-    [self returnToMainFrame];
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        sleep(1.5);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.mainFrameViewcontroller quitLaunchedApp];
-        });
-    });
+- (void)disconnectAndQuitApp {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self disconnectAndQuitApp]; });
+        return;
+    }
+    if (_isEndingStream) return;
+    [self.mainFrameViewcontroller disconnectAndQuitStreamFromController:self];
 }
 
 - (void) connectionStarted {
     Log(LOG_I, @"Connection started");
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+#if !TARGET_OS_TV
+        self->_hostInputReady = YES;
+        [self->_streamView setHostInputConnected:YES];
+        [self updateStreamControls];
+#endif
         // Leave the spinner spinning until it's obscured by
         // the first frame of video.
         self->_stageLabel.hidden = YES;
@@ -1710,7 +2102,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
         self->_spinner.hidden = YES;
         
         // Ensure correct view hierarchy before showing OSC
-        if ([self->_settings.renderingBackend intValue] == RENDER_METAL && self.metalViewController) {
+        if (self.metalViewController && self.metalViewController.view.superview == self.view) {
             [self.view sendSubviewToBack:self.metalViewController.view];
         }
         // For AVSB renderer, ensure streamView is at the back so OSC layers show
@@ -1730,10 +2122,15 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
                                                                      userInfo:nil
                                                                       repeats:YES];
         }
+#if !TARGET_OS_TV
+        // Catch a hardware change that arrived while the host was connecting.
+        [self reconcileGlassesStreamMode];
+#endif
     });
 }
 
 - (void)connectionTerminated:(int)errorCode {
+    [self stopMicrophoneCapture];
     Log(LOG_I, @"Connection terminated: %d", errorCode);
     
     unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
@@ -1741,6 +2138,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now
+        if (self->_isEndingStream) return;
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         
         NSString* title;
@@ -1786,7 +2184,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
                 {
                     NSString* errorString;
                     NSString* errorHint;
-                    if (abs(errorCode) > 1000) {
+                    if (errorCode > 1000 || errorCode < -1000) {
                         // We'll assume large errors are hex values
                         errorString = [NSString stringWithFormat:@"%08X", (uint32_t)errorCode];
                     }
@@ -1820,64 +2218,78 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void) stageStarting:(const char*)stageName {
-    Log(LOG_I, @"Starting %s", stageName);
-    return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSString* lowerCase = [NSString stringWithFormat:@"%s ...", stageName];
-        NSString* titleCase = [[[lowerCase substringToIndex:1] uppercaseString] stringByAppendingString:[lowerCase substringFromIndex:1]];
-        [self->_stageLabel setText:titleCase];
-        [self->_stageLabel sizeToFit];
-        self->_stageLabel.center = CGPointMake(self.view.frame.size.width / 2, self->_stageLabel.center.y);
-    });
+    Log(LOG_I, @"Starting %s", stageName ?: "unknown stage");
+}
+
+// Retire the producer before stopping C or publishing a successor. This may be
+// called from a C callback thread; the lock also invalidates a queued main start.
+- (void)stopMicrophoneCapture {
+#if !TARGET_OS_TV
+    MicHandler *retiring;
+    @synchronized (self) {
+        _microphoneCaptureStopped = YES;
+        _microphoneGeneration++;
+        _micStreamInitialized = NO;
+        retiring = micHandler;
+        micHandler = nil;
+    }
+    [retiring clean];
+#endif
 }
 
 - (void) stageComplete:(const char*)stageName {
-    _micStreamInitialized = false;
-    if(strcmp(stageName, "mic stream establishment")==0){
-        if(self->_streamConfig.redirectMic){
-            dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC));
-            dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                self->_micStreamInitialized = true;
-                self->micHandler = [[MicHandler alloc] initWithUseBuiltinMic:self->_settings.useBuiltinMic];
+#if !TARGET_OS_TV
+    if (stageName == NULL) return;
+    if (strcmp(stageName, LiGetStageName(STAGE_MIC_STREAM_UNSUPPORTED_OR_UNINITIALIZED)) == 0) {
+        [self stopMicrophoneCapture];
+        return;
+    }
+    if (strcmp(stageName, LiGetStageName(STAGE_MIC_STREAM_START)) == 0) {
+        Connection *owner = [ConnectionLifecycle activeContext];
+        if (![owner isKindOfClass:Connection.class]) return;
+        NSUInteger generation;
+        @synchronized (self) {
+            if (_microphoneCaptureStopped || !_streamConfig.redirectMic) return;
+            generation = ++_microphoneGeneration;
+        }
+        // Audio-session setup stays on main. Keeping the existing startup delay
+        // must not permit capture after an early disconnect or failed launch.
+        __weak StreamFrameViewController *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            StreamFrameViewController *self = weakSelf;
+            if (self == nil) return;
+            @synchronized (self) {
+                if (self->_microphoneCaptureStopped || self->_isEndingStream ||
+                    generation != self->_microphoneGeneration || !self->_streamConfig.redirectMic ||
+                    ![MicHandler permissionGranted]) return;
+                __block BOOL currentOwner = NO;
+                [owner performMicrophoneInput:^{ currentOwner = YES; }];
+                if (!currentOwner) return;
+                [self->micHandler clean];
+                self->micHandler = [[MicHandler alloc] initWithUseBuiltinMic:self->_settings.useBuiltinMic
+                    sendPacket:^(NSData *packet) {
+                        [owner performMicrophoneInput:^{
+                            sendMicrophoneOpusData(packet.bytes, (int)packet.length);
+                        }];
+                    }];
+                self->_micStreamInitialized = YES;
                 [MicHandler setVolume:self->_settings.micVolume.floatValue];
                 [self->micHandler startTapping];
-            });
-        }
+            }
+        });
     }
-    
-    if(strcmp(stageName, "mic stream unsupported or unintialized")==0){
-        _micStreamInitialized = false;
-    }
-    
-    /*
-    if(strcmp(stageName, "video stream establishment")==0){
-        NSLog(@"sendAutoReleaseComboCommandWithCmdStrings %f", CACurrentMediaTime());
-        if(!_settings.enableHdr
-           && _settings.sdrPerformanceWorkaround
-           && [Utils hdrSupported]
-           ){
-            dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC));
-            dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                if(LiGetCurrentHostDisplayHdrMode()){
-                    NSArray* hdrCommand = [CommandManager.shared extractAutoReleaseButtonStringsFrom:@"WIN+ALT+B"];
-                    [CommandManager.shared sendAutoReleaseComboCommandWithCmdStrings:hdrCommand delay:0.15 index:0 pressOnly:false releaseOnly:false];
-                    dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC));
-                    dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                        [self->_streamMan setNeedRequeuing:true];
-                    });
-                }
-            });
-        }
-    }
-    */
+#endif
+
 }
 
 - (void) stageFailed:(const char*)stageName withError:(int)errorCode portTestFlags:(int)portTestFlags {
+    [self stopMicrophoneCapture];
     Log(LOG_I, @"Stage %s failed: %d", stageName, errorCode);
     
     unsigned int portTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portTestFlags);
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
         // Allow the display to go to sleep now
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         
@@ -1908,6 +2320,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     Log(LOG_I, @"Launch failed: %@", message);
     
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
         // Allow the display to go to sleep now
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         
@@ -1923,49 +2336,52 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)rumble:(unsigned short)controllerNumber lowFreqMotor:(unsigned short)lowFreqMotor highFreqMotor:(unsigned short)highFreqMotor {
-    Log(LOG_I, @"Rumble on gamepad %d: %04x %04x", controllerNumber, lowFreqMotor, highFreqMotor);
-    
-    [_controllerSupport rumble:controllerNumber lowFreqMotor:lowFreqMotor highFreqMotor:highFreqMotor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+        [self->_controllerSupport rumble:controllerNumber lowFreqMotor:lowFreqMotor highFreqMotor:highFreqMotor];
+    });
 }
 
 - (void) rumbleTriggers:(uint16_t)controllerNumber leftTrigger:(uint16_t)leftTrigger rightTrigger:(uint16_t)rightTrigger {
-    Log(LOG_I, @"Trigger rumble on gamepad %d: %04x %04x", controllerNumber, leftTrigger, rightTrigger);
-    
-    [_controllerSupport rumbleTriggers:controllerNumber leftTrigger:leftTrigger rightTrigger:rightTrigger];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+        [self->_controllerSupport rumbleTriggers:controllerNumber leftTrigger:leftTrigger rightTrigger:rightTrigger];
+    });
 }
 
 - (void) setMotionEventState:(uint16_t)controllerNumber motionType:(uint8_t)motionType reportRateHz:(uint16_t)reportRateHz {
-    Log(LOG_I, @"Set motion state on gamepad %d: %02x %u Hz", controllerNumber, motionType, reportRateHz);
-    
-    [_controllerSupport setMotionEventState:controllerNumber motionType:motionType reportRateHz:reportRateHz];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+        [self->_controllerSupport setMotionEventState:controllerNumber motionType:motionType reportRateHz:reportRateHz];
+    });
 }
 
 - (void) setControllerLed:(uint16_t)controllerNumber r:(uint8_t)r g:(uint8_t)g b:(uint8_t)b {
-    Log(LOG_I, @"Set controller LED on gamepad %d: l%02x%02x%02x", controllerNumber, r, g, b);
-    
-    [_controllerSupport setControllerLed:controllerNumber r:r g:g b:b];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+        [self->_controllerSupport setControllerLed:controllerNumber r:r g:g b:b];
+    });
 }
 
 - (void) setAdaptiveTriggers:(uint16_t)controllerNumber eventFlags:(uint8_t)eventFlags
                      typeLeft:(uint8_t)typeLeft typeRight:(uint8_t)typeRight
                          left:(const uint8_t*)left right:(const uint8_t*)right {
-    [_controllerSupport setAdaptiveTriggers:controllerNumber
-                                 eventFlags:eventFlags
-                                   typeLeft:typeLeft
-                                  typeRight:typeRight
-                                       left:left
-                                      right:right];
+    if (!left || !right) return;
+    NSData *leftEffect = [NSData dataWithBytes:left length:DS_EFFECT_PAYLOAD_SIZE];
+    NSData *rightEffect = [NSData dataWithBytes:right length:DS_EFFECT_PAYLOAD_SIZE];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
+        [self->_controllerSupport setAdaptiveTriggers:controllerNumber eventFlags:eventFlags
+            typeLeft:typeLeft typeRight:typeRight left:leftEffect.bytes right:rightEffect.bytes];
+    });
 }
 
 - (void)connectionStatusUpdate:(int)status {
     Log(LOG_W, @"Connection status update: %d", status);
 
-    // The stats overlay takes precedence over these warnings
-    if (_statsUpdateTimer != nil) {
-        return;
-    }
-    
     dispatch_async(dispatch_get_main_queue(), ^{
+        // UI state belongs to main; an old status must not revive a retired HUD.
+        if (self->_isEndingStream || self->_statsUpdateTimer != nil) return;
         switch (status) {
             case CONN_STATUS_OKAY:
                 [self updateOverlayText:nil];
@@ -2015,12 +2431,14 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 - (void) setHdrMode:(bool)enabled {
     Log(LOG_I, @"HDR is now: %s", enabled ? "active" : "inactive");
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
         [self updatePreferredDisplayMode:YES];
     });
 }
 
 - (void) videoContentShown {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isEndingStream) return;
         [self->_spinner stopAnimating];
         [self.view setBackgroundColor:[UIColor blackColor]];
 
@@ -2100,12 +2518,25 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)toggleStatsOverlay{
-    // Toggle the values on the current in-memory settings object for a temporary effect
     _settings.statsOverlayEnabled = !_settings.statsOverlayEnabled;
-    // _settings.enableGraphs = _settings.statsOverlayEnabled;
+#if !TARGET_OS_TV
+    SunlightMachineControlsSettings *controls = [[self resolvedMachineControls] copy];
+    controls.statsOverlayLevel = _settings.statsOverlayEnabled ? MIN(2, MAX(1, overlayLevel)) : 0;
+    [controls saveForHostUUID:self.streamConfig.hostUUID defaults:NSUserDefaults.standardUserDefaults globalDefaults:[self globalMachineControls]];
+    self.streamConfig.machineControls = controls;
+    _settings.statsOverlayLevel = @(controls.statsOverlayLevel);
+    // Keep the last visible detail level so the keyboard toggle restores it.
+    if (controls.statsOverlayEnabled) overlayLevel = (int)controls.statsOverlayLevel;
+#endif
     
     // Reconfigure the UI using the current in-memory settings, without reloading from disk
-    [self reConfigStreamViewRealtimeAndReloadSettings:NO reloadOnscreenWidgets:NO];
+    if (_statsUpdateTimer) { [_statsUpdateTimer invalidate]; _statsUpdateTimer = nil; }
+    [self setupOverlayView];
+    if (_settings.statsOverlayEnabled) {
+        _statsUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(updateStatsOverlay) userInfo:nil repeats:YES];
+        [self updateStatsOverlay];
+    } else [_overlayView removeFromSuperview];
+    [self updateStreamControls];
 }
 
 - (void)toggleMouseCapture{
@@ -2209,6 +2640,13 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 
 - (void)handleTouchDisableButtonUp {
     [_streamView toggleTouchDisabled:self.touchDisabled];
+#if !TARGET_OS_TV
+    SunlightMachineControlsSettings *controls = [[self resolvedMachineControls] copy];
+    controls.touchEnabled = !self.touchDisabled;
+    [controls saveForHostUUID:self.streamConfig.hostUUID defaults:NSUserDefaults.standardUserDefaults globalDefaults:[self globalMachineControls]];
+    self.streamConfig.machineControls = controls;
+    [self updateStreamControls];
+#endif
 }
 
 - (void)presentPressureCurveVC{
@@ -2315,7 +2753,11 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
         dispatch_block_cancel(_delayedRemoveExtScreen);
     }
         
+    __weak typeof(self) weakSelf = self;
     dispatch_block_t block = dispatch_block_create(0, ^{
+        typeof(self) self = weakSelf;
+        if (!self || self->_isEndingStream) return;
+        self->_delayedRemoveExtScreen = nil;
         [self handleViewResize];
         [self reConfigStreamViewRealtimeAndReloadSettings:YES reloadOnscreenWidgets:NO];
     });
@@ -2385,13 +2827,15 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void)setupTimer {
-    TemporarySettings* tempSettings = [[[DataManager alloc] init] getSettings];  //StreamFrameViewController retrieve the settings here.
-    safeTimer = [[SafeTimer alloc] initWithInterval:1.0/tempSettings.framerate.intValue delay:0 queueLabel:@"streamview.timer" handler:^{
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-            LiSendKeyboardEvent(0xFF, KEY_ACTION_UP, 0);
-            // LiSendTouchEvent(LI_TOUCH_EVENT_UP, 200, 1, 1, 0, 0, 0, 0);
-        });
-    }];
+    // Retain the input destination, never look up the next active connection.
+    // Its existing gate rejects work after disconnect or a local UI transition.
+    __weak StreamView *inputView = _streamView;
+    safeTimer = [[SafeTimer alloc] initWithInterval:1.0/MAX(1, self.streamConfig.frameRate)
+        delay:0 queueLabel:@"streamview.timer" handler:^{
+            SunlightDispatchHostInput(inputView, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+                LiSendKeyboardEvent(0xFF, KEY_ACTION_UP, 0);
+            });
+        }];
 }
 
 

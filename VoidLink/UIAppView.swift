@@ -13,6 +13,16 @@ import UIKit
 
 private let refreshCycle: TimeInterval = 1.0
 
+private final class CachedAppArtwork: NSObject {
+    let image: UIImage
+    let fileAttributes: NSDictionary
+
+    init(image: UIImage, fileAttributes: NSDictionary) {
+        self.image = image
+        self.fileAttributes = fileAttributes
+    }
+}
+
 @objc protocol AppViewUpdateLoopDelegate: AnyObject {
     func isInAppView() -> Bool
 }
@@ -30,6 +40,19 @@ final class UIAppView: UIButton {
     weak var updateLoopDelegate: AppViewUpdateLoopDelegate?
 
     private static var noImage: UIImage?
+    private static var preferredSize: CGSize {
+        #if os(tvOS)
+        return CGSize(width: 200, height: 265)
+        #else
+        return CGSize(width: 150, height: 200)
+        #endif
+    }
+
+    // Collection layout needs only geometry, not a view with loaded artwork,
+    // gesture recognizers and labels for every sizing query.
+    @objc static var preferredAspectRatio: CGFloat {
+        preferredSize.width / preferredSize.height
+    }
 
     let app: TemporaryApp
     fileprivate weak var callback: AppCallback?
@@ -38,6 +61,8 @@ final class UIAppView: UIButton {
     private var appOverlay: UIImageView?
     private var appImage: UIImageView
     private var contextMenuDelegate: AnyObject?
+    private var refreshTimer: Timer?
+    private var displayedCurrentApp = false
 
     @objc(initWithApp:cache:andCallback:)
     init(app: TemporaryApp, cache: NSCache<AnyObject, AnyObject>, andCallback callback: AppCallback) {
@@ -49,11 +74,7 @@ final class UIAppView: UIButton {
             UIAppView.noImage = UIImage(named: "NoAppImage")
         }
 
-        #if os(tvOS)
-        let initialFrame = CGRect(x: 0, y: 0, width: 200, height: 265)
-        #else
-        let initialFrame = CGRect(x: 0, y: 0, width: 150, height: 200)
-        #endif
+        let initialFrame = CGRect(origin: .zero, size: UIAppView.preferredSize)
 
         self.appImage = UIImageView(frame: initialFrame)
 
@@ -107,9 +128,27 @@ final class UIAppView: UIButton {
 
     override func didMoveToSuperview() {
         super.didMoveToSuperview()
-        if superview != nil {
-            updateLoop()
+        updateRefreshTimer()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateRefreshTimer()
+    }
+
+    private func updateRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard superview != nil, window != nil else { return }
+
+        updateLoop()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshCycle, repeats: true) { [weak self] _ in
+            self?.updateLoop()
         }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
     }
 
     @objc private func appClicked(_ view: UIView) {
@@ -126,33 +165,49 @@ final class UIAppView: UIButton {
         app.id == app.host?.currentGame
     }
 
+    private func loadAppArtwork() -> UIImage? {
+        guard let path = AppAssetManager.boxArtPath(for: app) else { return nil }
+        let cacheKey = "UIAppView.artwork:\(path)" as NSString
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) as NSDictionary else {
+            artCache.removeObject(forKey: cacheKey)
+            artCache.removeObject(forKey: app)
+            return nil
+        }
+
+        // The legacy preloader caches by app alone and does not invalidate a replaced
+        // file. Only reuse artwork whose on-disk version has also been recorded.
+        if let cached = artCache.object(forKey: cacheKey) as? CachedAppArtwork,
+           cached.fileAttributes.isEqual(attributes) {
+            return cached.image
+        }
+        artCache.removeObject(forKey: cacheKey)
+        artCache.removeObject(forKey: app)
+        guard let image = UIImage(contentsOfFile: path) else { return nil }
+        let isGFE2BlankImage = image.size.width == 130.0 && image.size.height == 180.0
+        let isGFE3BlankImage = image.size.width == 628.0 && image.size.height == 888.0
+        guard !isGFE2BlankImage, !isGFE3BlankImage else { return nil }
+
+        // Downloads currently write in place. Don't cache a version that changed
+        // while UIImage was loading it; the asset callback will refresh the view.
+        if let currentAttributes = try? FileManager.default.attributesOfItem(atPath: path) as NSDictionary,
+           attributes.isEqual(currentAttributes) {
+            artCache.setObject(CachedAppArtwork(image: image, fileAttributes: attributes), forKey: cacheKey)
+            artCache.setObject(image, forKey: app)
+        }
+        return image
+    }
+
     func updateAppImage() {
         appOverlay?.removeFromSuperview()
         appOverlay = nil
         appLabel?.removeFromSuperview()
         appLabel = nil
 
-        var noAppImage = false
-        var loadedAppImage: UIImage?
-
-        if let boxArtPath = AppAssetManager.boxArtPath(for: app) {
-            loadedAppImage = UIImage(contentsOfFile: boxArtPath)
-            if let loadedAppImage {
-                artCache.setObject(loadedAppImage, forKey: app)
-            }
-        }
-
-        if let loadedAppImage {
-            let isGFE2BlankImage = loadedAppImage.size.width == 130.0 && loadedAppImage.size.height == 180.0
-            let isGFE3BlankImage = loadedAppImage.size.width == 628.0 && loadedAppImage.size.height == 888.0
-            if !isGFE2BlankImage && !isGFE3BlankImage {
-                appImage.image = loadedAppImage
-            } else {
-                noAppImage = true
-            }
-        } else {
-            noAppImage = true
-        }
+        let loadedAppImage = loadAppArtwork()
+        let noAppImage = loadedAppImage == nil
+        appImage.image = loadedAppImage ?? UIAppView.noImage
+        displayedCurrentApp = isCurrentApp
+        appImage.layer.opacity = isHighlighted ? 0.5 : (displayedCurrentApp ? 0.75 : 1.0)
 
         if isCurrentApp {
             if #available(iOS 13.0, tvOS 13.0, *) {
@@ -221,9 +276,6 @@ final class UIAppView: UIButton {
         appOverlay.frame = CGRect(x: 0, y: 0, width: overlaySize, height: overlaySize)
         appOverlay.center = CGPoint(x: frameSize.width / 2.0, y: frameSize.height / 2.0 - 2.0 * verticalPadding)
 
-        if isCurrentApp {
-            appImage.layer.opacity = 0.75
-        }
     }
 
     @objc private func updateLoop() {
@@ -231,14 +283,13 @@ final class UIAppView: UIButton {
             return
         }
 
-        if (appOverlay != nil && !isCurrentApp) || (appOverlay == nil && isCurrentApp) {
+        if displayedCurrentApp != isCurrentApp {
             updateAppImage()
         }
 
         superview?.layer.shadowOpacity = 0
         alpha = app.hidden ? 0.4 : 1.0
 
-        perform(#selector(updateLoop), with: self, afterDelay: refreshCycle)
     }
 }
 

@@ -31,6 +31,7 @@
     
     TemporaryHost *_host; // May be nil
     NSString* _baseHTTPSURL;
+    NSMutableSet<NSURLSession *> *_certificateFailures;
 }
 
 + (NSData*) fixXmlVersion:(NSData*) xmlData {
@@ -120,19 +121,20 @@
     __block NSError* respError = nil;
     __block dispatch_semaphore_t requestLock = dispatch_semaphore_create(0);
     
-    Log(LOG_D, @"Making Request: %@", request);
+    // Query strings and response bodies contain pairing secrets and session keys.
+    Log(LOG_D, @"Request to %@ %@", request.request.URL.host, request.request.URL.path);
     NSURLSession* urlSession = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration] delegate:self delegateQueue:nil];
     [[urlSession dataTaskWithRequest:request.request completionHandler:^(NSData * __nullable data, NSURLResponse * __nullable response, NSError * __nullable error) {
         
         if (error != NULL) {
-            Log(LOG_D, @"Connection error: %@", error);
+            Log(LOG_D, @"Connection error: %@ (%ld)", error.domain, (long)error.code);
             respError = error;
         }
         else {
-            Log(LOG_D, @"Received response: %@", response);
+            Log(LOG_D, @"Received HTTP response: %ld", (long)[(NSHTTPURLResponse*)response statusCode]);
 
             if (data != NULL) {
-                Log(LOG_D, @"\n\nReceived data: %@\n\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+                Log(LOG_D, @"Received %lu response bytes", (unsigned long)data.length);
                 if ([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] != nil) {
                     requestResp = [HttpManager fixXmlVersion:data];
                 } else {
@@ -145,6 +147,11 @@
     }] resume];
     
     dispatch_semaphore_wait(requestLock, DISPATCH_TIME_FOREVER);
+    BOOL certificateFailure;
+    @synchronized(self) {
+        certificateFailure = [_certificateFailures containsObject:urlSession];
+        [_certificateFailures removeObject:urlSession];
+    }
     [urlSession invalidateAndCancel];
     
     if (!respError && request.response) {
@@ -159,11 +166,8 @@
             [self executeRequestSynchronously:request];
         }
     }
-    else if (respError && [respError code] == NSURLErrorServerCertificateUntrusted) {
-        // We must have a pinned cert for HTTPS. If we fail, it must be due to
-        // a non-matching cert, not because we had no cert at all.
-        assert(_serverCert != nil);
-        
+    else if (respError && (certificateFailure || [respError code] == NSURLErrorServerCertificateUntrusted ||
+                           [respError code] == NSURLErrorUserCancelledAuthentication)) {
         if (request.fallbackRequest) {
             // This will fall back to HTTP on serverinfo queries to allow us to pair again
             // and get the server cert updated.
@@ -172,6 +176,10 @@
             request.fallbackError = 0;
             request.fallbackRequest = NULL;
             [self executeRequestSynchronously:request];
+        }
+        else if (request.response) {
+            request.response.statusCode = respError.code;
+            request.response.statusMessage = @"Unable to authenticate the host or client certificate. Pair this PC again.";
         }
     }
     else if (respError && request.response) {
@@ -231,7 +239,6 @@
     }
     
     NSString* urlString = [NSString stringWithFormat:@"%@/applist?uniqueid=%@", _baseHTTPSURL, _uniqueId];
-    NSLog(@"urlString: %@", urlString);
     return [self createRequestFromString:urlString timeout:NORMAL_TIMEOUT_SEC];
 }
 
@@ -262,6 +269,11 @@
     if (![self ensureHttpsUrlPopulated:NO]) {
         return nil;
     }
+    if ([verb isEqualToString:@"resume"] && config.hostSessionIdSupported &&
+        [StreamConfiguration normalizedHostSessionId:config.expectedHostSessionId] == nil) {
+        Log(LOG_E, @"Refusing resume without a bound host session identifier");
+        return nil;
+    }
     
     // Using an FPS value over 60 causes SOPS to default to 720p60,
     // so force it to 0 to ensure the correct resolution is set. We
@@ -270,9 +282,11 @@
     // indicated by a negative version in the last field.
     int fps = (config.frameRate > 60 && ![config.appVersion containsString:@".-"]) ? 0 : config.frameRate;
     
-    NSString* urlString = [NSString stringWithFormat:@"%@/%@?uniqueid=%@&appid=%@&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%@&rikeyid=%d%@&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d&gcpersist=%d%s",
+    NSString* appIdentity = [StreamConfiguration normalizedHostSessionId:config.appID] != nil
+        ? [@"&appid=" stringByAppendingString:config.appID] : @"";
+    NSString* urlString = [NSString stringWithFormat:@"%@/%@?uniqueid=%@%@&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%@&rikeyid=%d%@&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d&gcpersist=%d%s",
                            _baseHTTPSURL, verb, _uniqueId,
-                           config.appID,
+                           appIdentity,
                            config.width, config.height, fps,
                            config.optimizeGameSettings ? 1 : 0,
                            [Utils bytesToHex:config.riKey], config.riKeyId,
@@ -282,9 +296,13 @@
                            config.gamepadMask, config.gamepadMask,
                            !config.multiController ? 1 : 0,
                            LiGetLaunchUrlQueryParameters()];
-    Log(LOG_I, @"Requesting: %@", urlString);
+    NSURLComponents* url = [NSURLComponents componentsWithString:urlString];
+    NSMutableArray<NSURLQueryItem*>* queryItems = [url.queryItems mutableCopy];
+    [queryItems addObjectsFromArray:[config sunlightLaunchQueryItemsForResume:[verb isEqualToString:@"resume"]]];
+    url.queryItems = queryItems;
+    Log(LOG_I, @"Requesting %@: source %dx%d, presentation %ld", verb, config.width, config.height, (long)config.streamMode);
     // This blocks while the app is launching
-    return [self createRequestFromString:urlString timeout:LONG_TIMEOUT_SEC];
+    return [self createRequestFromString:url.string timeout:LONG_TIMEOUT_SEC];
 }
 
 - (NSURLRequest*) newQuitAppRequestWithHostSessionId:(NSString*)hostSessionId {
@@ -300,7 +318,7 @@
         [queryItems addObject:[NSURLQueryItem queryItemWithName:@"hostSessionId" value:hostSessionId]];
     }
     url.queryItems = queryItems;
-    Log(LOG_I, @"Requesting quit: %@", url.string);
+    Log(LOG_I, @"Requesting %@ quit", hostSessionId != nil ? @"host-scoped" : @"legacy");
     return [self createRequestFromString:url.string timeout:LONG_TIMEOUT_SEC];
 }
 
@@ -311,7 +329,7 @@
     
     NSString* urlString = [NSString stringWithFormat:@"%@/bitrate?clientname=%@&bitrate=%@&uniqueid=%@", _baseHTTPSURL, clientName, [NSString stringWithFormat:@"%ld", (long)bitrateKbps], _uniqueId];
 
-    NSLog(@"bitrate urlString print: %@", urlString);
+    Log(LOG_I, @"Requesting bitrate: %ld Kbps", (long)bitrateKbps);
     return [self createRequestFromString:urlString timeout:LONG_TIMEOUT_SEC];
 }
 
@@ -328,76 +346,80 @@
 - (NSString*) bytesToHex:(NSData*)data {
     const unsigned char* bytes = [data bytes];
     NSMutableString *hex = [[NSMutableString alloc] init];
-    for (int i = 0; i < [data length]; i++) {
+    for (NSUInteger i = 0; i < [data length]; i++) {
         [hex appendFormat:@"%02X" , bytes[i]];
     }
     return hex;
 }
 
-// Returns an array containing the certificate
-- (NSArray*)getCertificate:(SecIdentityRef) identity {
-    SecCertificateRef certificate = nil;
-    
-    SecIdentityCopyCertificate(identity, &certificate);
-    
-    return [[NSArray alloc] initWithObjects:(__bridge_transfer id)certificate, nil];
+// Returns an array containing the certificate, or nil for an unusable identity.
+- (NSArray*)getCertificate:(SecIdentityRef)identity {
+    if (!identity) return nil;
+    SecCertificateRef certificate = NULL;
+    if (SecIdentityCopyCertificate(identity, &certificate) != errSecSuccess || !certificate) return nil;
+    return @[CFBridgingRelease(certificate)];
 }
 
-// Returns the identity
+// The caller owns the returned identity. Missing/corrupt local credentials fail
+// the challenge instead of passing NULL to Security.framework.
 - (SecIdentityRef)getClientCertificate {
-    SecIdentityRef identityApp = nil;
-    CFDataRef p12Data = (__bridge CFDataRef)[CryptoManager readP12FromFile];
-
-    CFStringRef password = CFSTR("limelight");
-    const void *keys[] = { kSecImportExportPassphrase };
-    const void *values[] = { password };
-    CFDictionaryRef options = CFDictionaryCreate(NULL, keys, values, 1, NULL, NULL);
-    CFArrayRef items = nil;
-    OSStatus securityError = SecPKCS12Import(p12Data, options, &items);
-
-    if (securityError == errSecSuccess) {
-        //Log(LOG_D, @"Success opening p12 certificate. Items: %ld", CFArrayGetCount(items));
-        CFDictionaryRef identityDict = CFArrayGetValueAtIndex(items, 0);
-        identityApp = (SecIdentityRef)CFRetain(CFDictionaryGetValue(identityDict, kSecImportItemIdentity));
-        CFRelease(items);
-    } else {
-        Log(LOG_E, @"Error opening Certificate.");
+    NSData *p12Data = [CryptoManager readP12FromFile];
+    if (p12Data.length == 0) return NULL;
+    NSDictionary *options = @{(__bridge NSString *)kSecImportExportPassphrase: @"limelight"};
+    CFArrayRef items = NULL;
+    SecIdentityRef identity = NULL;
+    OSStatus status = SecPKCS12Import((__bridge CFDataRef)p12Data, (__bridge CFDictionaryRef)options, &items);
+    if (status == errSecSuccess && items && CFArrayGetCount(items) > 0) {
+        CFDictionaryRef dictionary = CFArrayGetValueAtIndex(items, 0);
+        SecIdentityRef imported = (SecIdentityRef)CFDictionaryGetValue(dictionary, kSecImportItemIdentity);
+        if (imported) identity = (SecIdentityRef)CFRetain(imported);
     }
-    
-    CFRelease(options);
-    CFRelease(password);
-    
-    return identityApp;
+    if (items) CFRelease(items);
+    if (!identity) Log(LOG_E, @"Unable to load client certificate: %d", (int)status);
+    return identity;
+}
+
+- (void)cancelCertificateChallengeForSession:(NSURLSession *)session
+                                 completion:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completion {
+    // Foundation may report a cancelled challenge as either an authentication
+    // error or a generic cancellation. Preserve the explicit reason per request
+    // so only an existing serverinfo fallback can retry over HTTP.
+    @synchronized(self) {
+        if (!_certificateFailures) _certificateFailures = [NSMutableSet set];
+        [_certificateFailures addObject:session];
+    }
+    completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
 }
 
 - (void)URLSession:(NSURLSession *)session didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(nonnull void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * __nullable))completionHandler {
-    // Allow untrusted server certificates
+    // The certificate approved during pairing is the only trusted server identity.
     if([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust])
     {
-        if (SecTrustGetCertificateCount(challenge.protectionSpace.serverTrust) != 1) {
+        if (_serverCert.length == 0 || !challenge.protectionSpace.serverTrust ||
+            SecTrustGetCertificateCount(challenge.protectionSpace.serverTrust) != 1) {
             Log(LOG_E, @"Server certificate count mismatch");
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, NULL);
+            [self cancelCertificateChallengeForSession:session completion:completionHandler];
             return;
         }
         
         SecCertificateRef actualCert = SecTrustGetCertificateAtIndex(challenge.protectionSpace.serverTrust, 0);
         if (actualCert == nil) {
             Log(LOG_E, @"Server certificate parsing error");
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, NULL);
+            [self cancelCertificateChallengeForSession:session completion:completionHandler];
             return;
         }
         
         CFDataRef actualCertData = SecCertificateCopyData(actualCert);
         if (actualCertData == nil) {
             Log(LOG_E, @"Server certificate data parsing error");
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, NULL);
+            [self cancelCertificateChallengeForSession:session completion:completionHandler];
             return;
         }
         
         if (!CFEqual(actualCertData, (__bridge CFDataRef)_serverCert)) {
             Log(LOG_E, @"Server certificate mismatch");
             CFRelease(actualCertData);
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, NULL);
+            [self cancelCertificateChallengeForSession:session completion:completionHandler];
             return;
         }
         
@@ -412,7 +434,12 @@
     {
         SecIdentityRef identity = [self getClientCertificate];
         NSArray* certArray = [self getCertificate:identity];
-        NSURLCredential* newCredential = [NSURLCredential credentialWithIdentity:identity certificates:certArray persistence:NSURLCredentialPersistencePermanent];
+        if (!identity || certArray.count == 0) {
+            if (identity) CFRelease(identity);
+            [self cancelCertificateChallengeForSession:session completion:completionHandler];
+            return;
+        }
+        NSURLCredential* newCredential = [NSURLCredential credentialWithIdentity:identity certificates:certArray persistence:NSURLCredentialPersistenceNone];
         CFRelease(identity);
         completionHandler(NSURLSessionAuthChallengeUseCredential, newCredential);
     }

@@ -1,0 +1,9 @@
+# PC-shortcut session ownership
+
+Run `tests/run_command_execution_tests.sh`. Ten cases pass against the complete production `CommandManager.swift`. The macOS fixture supplies a no-op UIKit import (the source uses no UIKit types), two unrelated app-type doubles, and a recorded C input sink. No production code is extracted or rewritten, and no device/simulator is used.
+
+Coverage includes normal keyboard/mouse sequences and reverse release, refusal before connection/after retirement, cancellation before teardown, delayed old steps after a successor begins, already-lost ownership, multiple outstanding sequences, terminal cancellation, duplicate held-key accounting, empty commands and unchanged ownerless behavior. Input sends are asserted to run on the main thread. The cancellation boundary is deterministic: the first press is synchronous, and cancellation runs on that same thread before any delayed step can run.
+
+`StreamFrameViewController` retains one `CommandExecutionOwner` across every Toolbox presentation and supplies a predicate bound to that controller. Explicit PC shortcuts can execute while the local panel blocks ordinary input. Closing/reopening Toolbox does not cancel an intentional command. The stream calls `cancelPendingCommands` before clearing its connected flag and before C teardown, releasing only keys/buttons actually pressed by outstanding sequences. The owner is then permanently retired; delayed steps never look up a new controller or session.
+
+If ownership has already been lost, cancellation drops state without sending old releases into a successor. The pre-teardown cancellation call is therefore required for held-input cleanup; tests establish client send ordering, not host receipt acknowledgements. Existing macro call sites that do not supply an owner retain their previous behavior.

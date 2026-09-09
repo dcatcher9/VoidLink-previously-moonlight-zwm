@@ -85,12 +85,22 @@
         self.statusMessage = @"Response from host is too large to parse.";
         return;
     }
-    xmlDocPtr docPtr = xmlParseMemory([self.data bytes], (int)[self.data length]);
+    // libxml's default diagnostics echo the failing source line, which can
+    // contain pairing challenges or session keys. Use our payload-free error.
+    xmlDocPtr docPtr = xmlReadMemory(self.data.bytes, (int)self.data.length, NULL, NULL,
+                                    XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
     if (docPtr == NULL) {
         Log(LOG_W, @"An error occured trying to parse xml.");
         return;
     }
     
+    // GameStream responses have no DTD. Reject entity declarations rather than
+    // allowing untrusted response fields to expand them while reading content.
+    if (docPtr->intSubset || docPtr->extSubset) {
+        self.statusMessage = @"Host response contains unsupported XML declarations.";
+        xmlFreeDoc(docPtr);
+        return;
+    }
     xmlNodePtr node = xmlDocGetRootElement(docPtr);
     if (node == NULL) {
         self.statusMessage = @"Host response has no root XML element.";
@@ -158,7 +168,10 @@
     
     xmlFreeDoc(docPtr);
     
-    Log(LOG_D, @"Parsed XML data: %@", _elements);
+    // Pairing responses and launch responses contain secrets. Keep diagnostics
+    // useful without copying certificates, challenges, or session URLs to logs.
+    Log(LOG_D, @"Parsed host response: status=%ld, fields=%lu",
+        (long)self.statusCode, (unsigned long)_elements.count);
 }
 
 @end

@@ -16,6 +16,8 @@
 #import "Plot.h"
 #import "ControllerSupport.h"
 #import "KeyboardSupport.h"
+#import "SunlightInputGate.h"
+#import "SunlightInputDispatch.h"
 #import "VoidLink-Swift.h"
 #import "NativeTouchPointer.h"
 #import "NativeTouchHandler.h"
@@ -52,7 +54,6 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     bool isPencilHovering;
     NSMutableSet* keysDown;
-    float streamAspectRatio;
     
     // iOS 13.4 mouse support
     NSInteger lastMouseButtonMask;
@@ -70,6 +71,15 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     TouchMode touchMode;
     UIResponder* touchHandler;
     UIResponder* sessionTouchHandler;
+    SunlightInputGate *hostInputGate;
+    NSMutableDictionary<NSNumber *, UIPress *> *hostKeyPresses;
+    NSMutableSet<UITouch *> *acceptedHostTouches;
+    OSCProfile *configuredTouchProfile;
+    BOOL _sessionTrackpadOverrideEnabled;
+    BOOL localControlsPresented;
+    BOOL applicationInputInactive;
+    BOOL sessionTouchInputDisabled;
+    __weak ControllerSupport *inputControllerSupport;
 
     NSTimer* interactionTimer;
     BOOL hasUserInteracted;
@@ -97,14 +107,28 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
             streamConfig:(StreamConfiguration*)streamConfig
              gameProfile:(OSCProfile* )profile
  streamFrameTopLayerView:(UIView* )topLayerView{
+    if (!hostInputGate) hostInputGate = [[SunlightInputGate alloc] init];
+    else [hostInputGate cancelCurrentInput:^{ [self cancelActiveHostInput]; }];
+    inputControllerSupport = controllerSupport;
+    [controllerSupport setHostInputView:self];
+    NSNotificationCenter *inputNotifications = NSNotificationCenter.defaultCenter;
+    [inputNotifications removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
+    [inputNotifications removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
+    [inputNotifications addObserver:self selector:@selector(hostApplicationWillResignActive:)
+                              name:UIApplicationWillResignActiveNotification object:nil];
+    [inputNotifications addObserver:self selector:@selector(hostApplicationDidBecomeActive:)
+                              name:UIApplicationDidBecomeActiveNotification object:nil];
+    if (!hostKeyPresses) hostKeyPresses = [NSMutableDictionary dictionary];
+    if (!acceptedHostTouches) acceptedHostTouches = [NSMutableSet set];
+    [keyInputField resignFirstResponder];
+    [keyInputField removeFromSuperview];
     if(!self.streamFrameVC) self.streamFrameVC = (StreamFrameViewController* )[PublicUtils parentViewControllerForView:self];
     
     self->comboKeyModifierFlags = (UIKeyModifierControl|UIKeyModifierAlternate|UIKeyModifierShift);
 
     self->_streamFrameTopLayerView = topLayerView;
     self->_interactionDelegate = interactionDelegate;
-    self->streamAspectRatio = (float)streamConfig.width / (float)streamConfig.height;
-    self.streamAspectRatio = self->streamAspectRatio;
+    self.streamAspectRatio = (CGFloat)streamConfig.width / (CGFloat)streamConfig.height;
     _widgetSizeTransition = keepWidgetSize;
     
     settings = [[[DataManager alloc] init] getSettings];
@@ -148,6 +172,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     PencilHandler.shared = [[PencilHandler alloc] initWithStreamView:self settings:settings];
     _pencilHandler = PencilHandler.shared;
+    _pencilHandler.streamAspectRatio = self.streamAspectRatio;
 
     // iOS uses touch Mode depending on user preference
     [self updateTouchHandlerWithProfile:profile];
@@ -193,13 +218,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     if (@available(iOS 13.4, *)) {
         [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
         
-        UIPanGestureRecognizer *discreteMouseWheelRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(mouseWheelMovedDiscrete:)];
+        discreteMouseWheelRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(mouseWheelMovedDiscrete:)];
         discreteMouseWheelRecognizer.maximumNumberOfTouches = 0;
         discreteMouseWheelRecognizer.allowedScrollTypesMask = UIScrollTypeMaskDiscrete;
         discreteMouseWheelRecognizer.allowedTouchTypes = @[@(UITouchTypeIndirectPointer)];
         [self addGestureRecognizer:discreteMouseWheelRecognizer];
         
-        UIPanGestureRecognizer *continuousMouseWheelRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(mouseWheelMovedContinuous:)];
+        continuousMouseWheelRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(mouseWheelMovedContinuous:)];
         continuousMouseWheelRecognizer.maximumNumberOfTouches = 0;
         continuousMouseWheelRecognizer.allowedScrollTypesMask = UIScrollTypeMaskContinuous;
         continuousMouseWheelRecognizer.allowedTouchTypes = @[@(UITouchTypeIndirectPointer)];
@@ -211,7 +236,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
 #if defined(__IPHONE_16_1) || defined(__TVOS_16_1)
     if (@available(iOS 16.1, *)) {
-        UIHoverGestureRecognizer *stylusHoverRecognizer = [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(sendStylusHoverEvent:)];
+        stylusHoverRecognizer = [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(sendStylusHoverEvent:)];
         stylusHoverRecognizer.allowedTouchTypes = @[@(UITouchTypePencil)];
         [self addGestureRecognizer:stylusHoverRecognizer];
     }
@@ -227,11 +252,17 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     // This is critical to ensure keyboard events are delivered to this
     // StreamView and not our parent UIView, especially on tvOS.
-    [self becomeFirstResponder];
+    [self setLocalControlsPresented:localControlsPresented];
+    if (!localControlsPresented) [self becomeFirstResponder];
 }
 
 - (void)updateTouchHandlerWithProfile:(OSCProfile* )profile{
-    touchMode = profile.touchMode;
+    configuredTouchProfile = profile;
+    if ([sessionTouchHandler isKindOfClass:[RelativeTouchHandler class]]) {
+        UIGestureRecognizer *recognizer = ((RelativeTouchHandler *)sessionTouchHandler).mouseRightClickTapRecognizer;
+        [self.streamFrameTopLayerView removeGestureRecognizer:recognizer];
+    }
+    touchMode = _sessionTrackpadOverrideEnabled ? RelativeTouch : profile.touchMode;
     switch (touchMode) {
         case NativeTouch:
             keyboardToggleRecognizer.immediateTriggering = false;
@@ -259,7 +290,8 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
             break;
     }
     sessionTouchHandler = touchHandler;
-    if(_streamFrameVC.touchDisabled) touchHandler = nil;
+    sessionTouchInputDisabled = _streamFrameVC.touchDisabled;
+    if (sessionTouchInputDisabled) touchHandler = nil;
 }
 
 - (void)refreshKeyboardToggleRecognizer:(uint8_t)numberOfTouches{
@@ -721,7 +753,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
             // remove all keyboard widget views first
             [self clearOnScreenWidgets];
             
-            self->_streamFrameVC.touchDisabled = false;
+            // Touch availability belongs to this PC, independent of widget reloads.
             self->_streamFrameVC.singleTouchDisabled = false;
             PencilHandler* pencilHandler = [PencilHandler shared];
             if(pencilHandler) pencilHandler.disableTilt = false;
@@ -879,6 +911,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 
 - (CGSize) getVideoAreaSize {
+    CGFloat streamAspectRatio = self.streamAspectRatio;
     if (self.bounds.size.width > self.bounds.size.height * streamAspectRatio) {
         return CGSizeMake(self.bounds.size.height * streamAspectRatio, self.bounds.size.height);
     } else {
@@ -973,14 +1006,15 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     // CGFloat pressure = (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle);
     
-    return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
+    return SunlightHostInput(self, ^int{ return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height,
                           (event.force / event.maximumPossibleForce) / sin(event.altitudeAngle),
                           0.0f, 0.0f,
                           [self getRotationFromAzimuthAngle:[event azimuthAngleInView:self]],
-                          [self getTiltFromAltitudeAngle:event.altitudeAngle]) != LI_ERR_UNSUPPORTED;
+                          [self getTiltFromAltitudeAngle:event.altitudeAngle]); }) != LI_ERR_UNSUPPORTED;
 }
 
 - (void)sendStylusHoverEvent:(UIHoverGestureRecognizer*)gesture API_AVAILABLE(ios(13.0)) {
+    if (!self.hostTouchInputAllowed) return;
     uint8_t type;
 
     switch (gesture.state) {
@@ -1003,7 +1037,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     if(gesture.state==UIGestureRecognizerStateEnded){
         dispatch_time_t delayTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.008 * NSEC_PER_SEC));
-        dispatch_after(delayTime, dispatch_get_main_queue(), ^{// Code to execute after the delay
+        SunlightDispatchHostInputAfter(self, delayTime, dispatch_get_main_queue(), ^{// Code to execute after the delay
             self->isPencilHovering = false;
         });
     }
@@ -1033,11 +1067,11 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 #endif
     
     
-    dispatch_after(0, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0), ^{// Code to execute after the delay
+    SunlightDispatchHostInputAfter(self, 0, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0), ^{// Code to execute after the delay
         if(PencilHandler.isDrawing && PencilHandler.pencilAndHoverMode == pencilOnly && PencilHandler.pencilAndHoverMode == hoverDisabled) return;
         switch (PencilHandler.pencilAndHoverMode) {
             case pencilOnly:
-                LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height, distance, 0.0f, 0.0f, rotationAngle, tiltAngle);
+                SunlightHostInput(self, ^int{ return LiSendPenEvent(type, LI_TOOL_TYPE_PEN, 0, location.x / videoSize.width, location.y / videoSize.height, distance, 0.0f, 0.0f, rotationAngle, tiltAngle); });
                 break;
             case pencilToMouse:
                 if(gesture.state != UIGestureRecognizerStateEnded) [self updateCursorLocation:originalLocation isMouse:NO];
@@ -1058,6 +1092,16 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 #endif
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (!self.hostInputAllowed) return;
+    if (!self.hostTouchInputAllowed) {
+        NSMutableSet *mouseTouches = [NSMutableSet set];
+        if (@available(iOS 13.4, tvOS 13.4, *)) {
+            for (UITouch *touch in touches) if (touch.type == UITouchTypeIndirectPointer) [mouseTouches addObject:touch];
+        }
+        touches = mouseTouches;
+        if (touches.count == 0) return;
+    }
+    [acceptedHostTouches unionSet:touches];
 #if !TARGET_OS_TV
     // if (@available(iOS 13.4, *)) {
     // cancel restriction of native touch for iOS13.3 & lower
@@ -1097,10 +1141,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     
     NSSet* targetTouches = nonPencilTouches ? nonPencilTouches : touches;
     if(touchMode != AbsoluteTouch){
-        if([self isOnScreenWidgetEnabled]) [self->_onScreenControls handleTouchDownEvent:targetTouches];
+        if([self isOnScreenWidgetEnabled] && [self getCurrentOscState] != OnScreenControlsLevelOff) [self->_onScreenControls handleTouchDownEvent:targetTouches];
         [self->touchHandler touchesBegan:targetTouches withEvent:event];
     }
-    else if(![_onScreenControls handleTouchDownEvent:targetTouches]) [touchHandler touchesBegan:targetTouches withEvent:event];
+    else if([self getCurrentOscState] == OnScreenControlsLevelOff || ![_onScreenControls handleTouchDownEvent:targetTouches]) [touchHandler touchesBegan:targetTouches withEvent:event];
 }
 
 - (UIBarButtonItem *)createButtonWithImageNamed:(NSString *)imageName backgroundColor:(UIColor *)backgroundColor target:(id)target action:(SEL)action keyCode:(NSInteger)keyCode isToggleable:(BOOL)isToggleable isDoneButton:(bool)isDoneButton {
@@ -1152,17 +1196,17 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         if (isToggleable){
             //	(@"keycode %x", keyCode);
             if (isOn){
-                LiSendKeyboardEvent(keyCode, KEY_ACTION_DOWN, 0);
+                SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(keyCode, KEY_ACTION_DOWN, 0); });
                 [keysDown addObject:@(keyCode)];
             } else {
-                LiSendKeyboardEvent(keyCode, KEY_ACTION_UP, 0);
+                SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(keyCode, KEY_ACTION_UP, 0); });
                 [keysDown removeObject:@(keyCode)];
             }
         }
         else {
-            LiSendKeyboardEvent(keyCode, KEY_ACTION_DOWN, 0);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(keyCode, KEY_ACTION_DOWN, 0); });
             usleep(50 * 1000);
-            LiSendKeyboardEvent(keyCode, KEY_ACTION_UP, 0);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(keyCode, KEY_ACTION_UP, 0); });
         }
     }
 }
@@ -1216,7 +1260,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
                 }
                 
                 if (changedButtons & buttonFlag) {
-                    LiSendMouseButtonEvent(buttonAction, i);
+                    SunlightHostInput(self, ^int{ return LiSendMouseButtonEvent(buttonAction, i); });
                 }
             }
             
@@ -1230,6 +1274,11 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (!self.hostInputAllowed) return;
+    NSMutableSet *acceptedTouches = [touches mutableCopy];
+    [acceptedTouches intersectSet:acceptedHostTouches];
+    if (acceptedTouches.count == 0) return;
+    touches = acceptedTouches;
 #if !TARGET_OS_TV
     
     if (touchMode == NativeTouchOnly) {
@@ -1275,9 +1324,9 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     NSSet* targetTouches = nonPencilTouches ? nonPencilTouches : touches;
     if(self->touchMode != AbsoluteTouch){
         [self->touchHandler touchesMoved:targetTouches withEvent:event];
-        if([self isOnScreenWidgetEnabled]) [self->_onScreenControls handleTouchMovedEvent:targetTouches];
+        if([self isOnScreenWidgetEnabled] && [self getCurrentOscState] != OnScreenControlsLevelOff) [self->_onScreenControls handleTouchMovedEvent:targetTouches];
     }
-    else if(![self->_onScreenControls handleTouchMovedEvent:targetTouches]) [self->touchHandler touchesMoved:targetTouches withEvent:event];
+    else if([self getCurrentOscState] == OnScreenControlsLevelOff || ![self->_onScreenControls handleTouchMovedEvent:targetTouches]) [self->touchHandler touchesMoved:targetTouches withEvent:event];
 }
 
 - (void) handleKeyCombos:(UIPress*) press{
@@ -1324,6 +1373,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (!self.hostInputAllowed) { [super pressesBegan:presses withEvent:event]; return; }
     if (@available(iOS 17.0, *)) nil;
     else {
         BOOL shouldBypassMagnifierInset = NO;
@@ -1338,17 +1388,20 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         }
     }
     
-    BOOL handled = NO;
+    __block BOOL handled = NO;
     
     if (@available(iOS 13.4, tvOS 13.4, *)) {
         for (UIPress* press in presses) {
             [self handleKeyCombos:press];
+            if (!self.hostInputAllowed) continue;
             // For now, we'll treated it as handled if we handle at least one of the
             // UIPress events inside the set.
-            if ([KeyboardSupport sendKeyEventForPress:press down:YES]) {
-                // This will prevent the legacy UITextField from receiving the event
-                handled = YES;
-            }
+            [self performHostInput:^{
+                if ([KeyboardSupport sendKeyEventForPress:press down:YES]) {
+                    self->hostKeyPresses[@(press.key.keyCode)] = press;
+                    handled = YES;
+                }
+            }];
         }
     }
     
@@ -1358,6 +1411,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (!self.hostInputAllowed) { [super pressesEnded:presses withEvent:event]; return; }
     if (@available(iOS 17.0, *)) nil;
     else {
         BOOL shouldRestoreMagnifierMetrics = NO;
@@ -1373,16 +1427,19 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         }
     }
     
-    BOOL handled = NO;
+    __block BOOL handled = NO;
     
     if (@available(iOS 13.4, tvOS 13.4, *)) {
         for (UIPress* press in presses) {
             // For now, we'll treated it as handled if we handle at least one of the
             // UIPress events inside the set.
-            if ([KeyboardSupport sendKeyEventForPress:press down:NO]) {
-                // This will prevent the legacy UITextField from receiving the event
-                handled = YES;
-            }
+            [self performHostInput:^{
+                if (self->hostKeyPresses[@(press.key.keyCode)] &&
+                    [KeyboardSupport sendKeyEventForPress:press down:NO]) {
+                    [self->hostKeyPresses removeObjectForKey:@(press.key.keyCode)];
+                    handled = YES;
+                }
+            }];
         }
     }
     
@@ -1392,6 +1449,12 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (!self.hostInputAllowed) return;
+    NSMutableSet *acceptedTouches = [touches mutableCopy];
+    [acceptedTouches intersectSet:acceptedHostTouches];
+    if (acceptedTouches.count == 0) return;
+    touches = acceptedTouches;
+    [acceptedHostTouches minusSet:touches];
 #if !TARGET_OS_TV
 
     if (touchMode == NativeTouchOnly) {
@@ -1427,24 +1490,17 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     NSSet* targetTouches = nonPencilTouches ? nonPencilTouches : touches;
     if(touchMode != AbsoluteTouch){
         [self->touchHandler touchesEnded:targetTouches withEvent:event]; // when touches ended, must call the native touchhandler before onScreenControls, since the NSSet of touches captured by on screen button shall be updated later
-        if([self isOnScreenWidgetEnabled]) [self->_onScreenControls handleTouchUpEvent:targetTouches];
+        if([self isOnScreenWidgetEnabled] && [self getCurrentOscState] != OnScreenControlsLevelOff) [self->_onScreenControls handleTouchUpEvent:targetTouches];
     }
-    else if(![_onScreenControls handleTouchUpEvent:targetTouches]) [touchHandler touchesEnded:targetTouches withEvent:event];
+    else if([self getCurrentOscState] == OnScreenControlsLevelOff || ![_onScreenControls handleTouchUpEvent:targetTouches]) [touchHandler touchesEnded:targetTouches withEvent:event];
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    [touchHandler touchesCancelled:touches withEvent:event];
-#if !TARGET_OS_TV
-    if (touchMode == NativeTouchOnly) return; //This is a native touch oriented fork, in pure native touch mode, this call back method deals with native touch only.
-    for (UITouch* touch in touches) {
-        if (touch.type == UITouchTypePencil) {
-            [self touchesEnded:touches withEvent:event];
-        }
-    }
-#endif
-    [self handleMouseButtonEvent:BUTTON_ACTION_RELEASE
-                      forTouches:touches
-                       withEvent:event];
+    [hostInputGate cancelCurrentInput:^{ [self cancelActiveHostInput]; }];
+}
+
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self pressesEnded:presses withEvent:event];
 }
 
 #if !TARGET_OS_TV
@@ -1461,7 +1517,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     // mouse motion when using a Citrix X1 mouse.
     if (normalizedLocation.x != lastMouseX || normalizedLocation.y != lastMouseY || !isMouse) {
         if (lastMouseX != 0 || lastMouseY != 0 || !isMouse) {
-            LiSendMousePositionEvent(normalizedLocation.x, normalizedLocation.y, videoSize.width, videoSize.height);
+            SunlightHostInput(self, ^int{ return LiSendMousePositionEvent(normalizedLocation.x, normalizedLocation.y, videoSize.width, videoSize.height); });
         }
         
         if (isMouse) {
@@ -1482,13 +1538,8 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     }
     
     // This logic mimics what iOS does with AVLayerVideoGravityResizeAspect
-    CGSize videoSize;
+    CGSize videoSize = [self getVideoAreaSize];
     CGPoint videoOrigin;
-    if (self.bounds.size.width > self.bounds.size.height * streamAspectRatio) {
-        videoSize = CGSizeMake(self.bounds.size.height * streamAspectRatio, self.bounds.size.height);
-    } else {
-        videoSize = CGSizeMake(self.bounds.size.width, self.bounds.size.width / streamAspectRatio);
-    }
     videoOrigin = CGPointMake(self.bounds.size.width / 2 - videoSize.width / 2,
                               self.bounds.size.height / 2 - videoSize.height / 2);
     
@@ -1496,7 +1547,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     // Motion with buttons pressed in handled in touchesMoved:
     if (lastMouseButtonMask == 0) {
         dispatch_time_t delayTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.001 * NSEC_PER_SEC));
-        dispatch_after(delayTime, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0), ^{
+        SunlightDispatchHostInputAfter(self, delayTime, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0), ^{
             if(!self->isPencilHovering) [self updateCursorLocation:request.location isMouse:YES];
         });
     }
@@ -1533,7 +1584,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         short translationDeltaY = ((currentScrollTranslation.y - lastScrollTranslation.y) / self.bounds.size.height) * translationMultiplier;
         if(settings.reverseMouseWheelDirection) translationDeltaY = - translationDeltaY;
         if (translationDeltaY != 0) {
-            LiSendHighResScrollEvent(translationDeltaY);
+            SunlightHostInput(self, ^int{ return LiSendHighResScrollEvent(translationDeltaY); });
             lastScrollTranslation = currentScrollTranslation;
         }
     }
@@ -1542,7 +1593,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         short translationDeltaX = ((currentScrollTranslation.x - lastScrollTranslation.x) / self.bounds.size.width) * translationMultiplier;
         if (translationDeltaX != 0) {
             // Direction is reversed from vertical scrolling
-            LiSendHighResHScrollEvent(-translationDeltaX);
+            SunlightHostInput(self, ^int{ return LiSendHighResHScrollEvent(-translationDeltaX); });
             lastScrollTranslation = currentScrollTranslation;
         }
     }
@@ -1569,7 +1620,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         short translationDeltaY = currentScrollTranslation.y - lastScrollTranslation.y;
         if(settings.reverseMouseWheelDirection) translationDeltaY = - translationDeltaY;
         if (translationDeltaY != 0) {
-            LiSendScrollEvent(translationDeltaY > 0 ? 1 : -1);
+            SunlightHostInput(self, ^int{ return LiSendScrollEvent(translationDeltaY > 0 ? 1 : -1); });
         }
     }
 
@@ -1577,7 +1628,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         short translationDeltaX = currentScrollTranslation.x - lastScrollTranslation.x;
         if (translationDeltaX != 0) {
             // Direction is reversed from vertical scrolling
-            LiSendHScrollEvent(translationDeltaX < 0 ? 1 : -1);
+            SunlightHostInput(self, ^int{ return LiSendHScrollEvent(translationDeltaX < 0 ? 1 : -1); });
         }
     }
     
@@ -1587,6 +1638,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 #endif
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (!self.hostInputAllowed) return NO;
     if (@available(iOS 13.0, *)) {
         // Disable the 3 finger tap gestures that trigger the copy/paste/undo toolbar on iOS 13+
         return gestureRecognizer.name == nil || ![gestureRecognizer.name hasPrefix:@"kbProductivity."];
@@ -1598,15 +1650,15 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     // This method is called when the "Return" key is pressed.
-    LiSendKeyboardEvent(0x0d, KEY_ACTION_DOWN, 0);
+    SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(0x0d, KEY_ACTION_DOWN, 0); });
     usleep(50 * 1000);
-    LiSendKeyboardEvent(0x0d, KEY_ACTION_UP, 0);
+    SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(0x0d, KEY_ACTION_UP, 0); });
     return NO;
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     for (NSNumber* keyCode in keysDown) {
-        LiSendKeyboardEvent([keyCode shortValue], KEY_ACTION_UP, 0);
+        SunlightHostInput(self, ^int{ return LiSendKeyboardEvent([keyCode shortValue], KEY_ACTION_UP, 0); });
     }
     [keysDown removeAllObjects];
 }
@@ -1621,12 +1673,12 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     if (textField.markedTextRange) return;
 
     NSString* inputText = textField.text;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    SunlightDispatchHostInput(self, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         // If the text became empty, we know the user pressed the backspace key.
         if ([inputText isEqual:@""]) {
-            LiSendKeyboardEvent(0x08, KEY_ACTION_DOWN, 0);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(0x08, KEY_ACTION_DOWN, 0); });
             usleep(50 * 1000);
-            LiSendKeyboardEvent(0x08, KEY_ACTION_UP, 0);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(0x08, KEY_ACTION_UP, 0); });
         } else {
             // Character 0 will be our known sentinel value
             
@@ -1638,7 +1690,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
                     const char* utf8String = [inputText UTF8String];
                     
                     // Skip the first character which is our sentinel
-                    LiSendUtf8TextEvent(utf8String + 1, (int)strlen(utf8String) - 1);
+                    SunlightHostInput(self, ^int{ return LiSendUtf8TextEvent(utf8String + 1, (int)strlen(utf8String) - 1); });
                     return;
                 }
             }
@@ -1672,24 +1724,24 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)sendLowLevelEvent:(struct KeyEvent)event {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    SunlightDispatchHostInput(self, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         // When we want to send a modified key (like uppercase letters) we need to send the
         // modifier ("shift") seperately from the key itself.
         if (event.modifier != 0) {
-            LiSendKeyboardEvent(event.modifierKeycode, KEY_ACTION_DOWN, event.modifier);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(event.modifierKeycode, KEY_ACTION_DOWN, event.modifier); });
         }
         // Let the host know these are not (necessarily) normalized to US English scancodes
-        LiSendKeyboardEvent2(event.keycode, KEY_ACTION_DOWN, event.modifier, SS_KBE_FLAG_NON_NORMALIZED);
+        SunlightHostInput(self, ^int{ return LiSendKeyboardEvent2(event.keycode, KEY_ACTION_DOWN, event.modifier, SS_KBE_FLAG_NON_NORMALIZED); });
         usleep(50 * 1000);
-        LiSendKeyboardEvent2(event.keycode, KEY_ACTION_UP, event.modifier, SS_KBE_FLAG_NON_NORMALIZED);
+        SunlightHostInput(self, ^int{ return LiSendKeyboardEvent2(event.keycode, KEY_ACTION_UP, event.modifier, SS_KBE_FLAG_NON_NORMALIZED); });
         if (event.modifier != 0) {
-            LiSendKeyboardEvent(event.modifierKeycode, KEY_ACTION_UP, event.modifier);
+            SunlightHostInput(self, ^int{ return LiSendKeyboardEvent(event.modifierKeycode, KEY_ACTION_UP, event.modifier); });
         }
     });
 }
 
 - (BOOL)canBecomeFirstResponder {
-    return YES;
+    return !localControlsPresented;
 }
 
 - (NSArray<UIKeyCommand *> *)keyCommands
@@ -1751,7 +1803,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         return;
     }
     
-    LiSendMouseMoveEvent(shortX, shortY);
+    SunlightHostInput(self, ^int{ return LiSendMouseMoveEvent(shortX, shortY); });
     
     accumulatedMouseDeltaX -= shortX;
     accumulatedMouseDeltaY -= shortY;
@@ -1771,15 +1823,15 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)mouseDownWithIdentifier:(NSUUID * _Nonnull)identifier button:(enum X1MouseButton)button {
-    LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, [self buttonFromX1ButtonCode:button]);
+    SunlightHostInput(self, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, [self buttonFromX1ButtonCode:button]); });
 }
 
 - (void)mouseUpWithIdentifier:(NSUUID * _Nonnull)identifier button:(enum X1MouseButton)button {
-    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, [self buttonFromX1ButtonCode:button]);
+    SunlightHostInput(self, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, [self buttonFromX1ButtonCode:button]); });
 }
 
 - (void)wheelDidScrollWithIdentifier:(NSUUID * _Nonnull)identifier deltaZ:(int8_t)deltaZ {
-    LiSendScrollEvent(deltaZ);
+    SunlightHostInput(self, ^int{ return LiSendScrollEvent(deltaZ); });
 }
 
 - (void)alterAbsTouchDragWith:(int32_t)mouseButton{
@@ -1811,13 +1863,100 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 }
 
 - (void)toggleTouchDisabled:(bool)disabled{
+    if (sessionTouchInputDisabled == disabled) return;
+    sessionTouchInputDisabled = disabled;
+    [hostInputGate cancelCurrentInput:^{ [self cancelActiveHostInput]; }];
     touchHandler = disabled ? nil : sessionTouchHandler;
 }
 
 - (void)cleanUp{
+    [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationWillResignActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
+    [hostInputGate invalidateWithCancellation:^{ [self cancelActiveHostInput]; }];
+    [inputControllerSupport setLocalControlsPresented:YES];
     [keyInputField resignFirstResponder];
     keyInputField.delegate = nil;
 }
+
+- (NSUInteger)hostInputGeneration { return hostInputGate.generation; }
+- (BOOL)hostInputAllowed { return hostInputGate.allowed; }
+- (BOOL)hostTouchInputAllowed { return hostInputGate.allowed && !sessionTouchInputDisabled; }
+- (BOOL)sessionTrackpadOverrideEnabled { return _sessionTrackpadOverrideEnabled; }
+- (void)performHostInputForGeneration:(NSUInteger)generation action:(dispatch_block_t)action {
+    [hostInputGate performForGeneration:generation action:action];
+}
+- (void)performHostInput:(dispatch_block_t)action { [hostInputGate perform:action]; }
+
+// Called under the input gate after the generation changes. Release raw host
+// state here, bypassing admission; never route cancellation through tap-up code.
+- (void)cancelActiveHostInput {
+    [acceptedHostTouches removeAllObjects];
+    if ([sessionTouchHandler respondsToSelector:@selector(cancelHostTouches)]) {
+        [(id)sessionTouchHandler cancelHostTouches];
+    }
+    [_pencilHandler cancelHostTouches];
+    [TouchPadGestureHandler cancelHostGesturesIn:self];
+    for (NSNumber *keyCode in keysDown) LiSendKeyboardEvent(keyCode.shortValue, KEY_ACTION_UP, 0);
+    [keysDown removeAllObjects];
+    if (@available(iOS 13.4, tvOS 13.4, *)) {
+        for (UIPress *press in hostKeyPresses.allValues) [KeyboardSupport sendKeyEventForPress:press down:NO];
+    }
+    [hostKeyPresses removeAllObjects];
+    for (int button = BUTTON_LEFT; button <= BUTTON_X2; button++)
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
+    lastMouseButtonMask = 0;
+    lastMouseX = lastMouseY = 0;
+    lastScrollTranslation = CGPointZero;
+    accumulatedMouseDeltaX = accumulatedMouseDeltaY = 0;
+    isPencilHovering = false;
+    [OnScreenControls.touchesCapturedByOnScreenControls removeAllObjects];
+}
+
+- (void)setHostInputConnected:(BOOL)connected {
+    if (!hostInputGate) hostInputGate = [[SunlightInputGate alloc] init];
+    [hostInputGate setConnected:connected cancellation:^{ [self cancelActiveHostInput]; }];
+}
+
+- (void)hostApplicationWillResignActive:(NSNotification *)notification {
+    applicationInputInactive = YES;
+    [hostInputGate setBlocked:YES cancellation:^{ [self cancelActiveHostInput]; }];
+}
+
+- (void)hostApplicationDidBecomeActive:(NSNotification *)notification {
+    applicationInputInactive = NO;
+    [hostInputGate setBlocked:localControlsPresented cancellation:^{ [self cancelActiveHostInput]; }];
+}
+
+- (void)showSoftKeyboard {
+    if (!self.hostInputAllowed || keyInputField.isFirstResponder) return;
+    [self toggleKeyboard];
+}
+
+- (void)setLocalControlsPresented:(BOOL)presented {
+    if (!hostInputGate) hostInputGate = [[SunlightInputGate alloc] init];
+    BOOL changed = localControlsPresented != presented;
+    localControlsPresented = presented;
+    [hostInputGate setBlocked:(presented || applicationInputInactive) cancellation:^{ [self cancelActiveHostInput]; }];
+    [inputControllerSupport setLocalControlsPresented:presented];
+    keyboardToggleRecognizer.enabled = !presented;
+    discreteMouseWheelRecognizer.enabled = !presented;
+    continuousMouseWheelRecognizer.enabled = !presented;
+    if (presented && changed) {
+        [keyInputField resignFirstResponder];
+        [self resignFirstResponder];
+        isInputingText = false;
+    } else if (changed && self.hostInputAllowed && !keyInputField.isFirstResponder) {
+        [self becomeFirstResponder];
+    }
+}
+
+- (void)setSessionTrackpadOverrideEnabled:(BOOL)enabled {
+    if (_sessionTrackpadOverrideEnabled == enabled) return;
+    [hostInputGate cancelCurrentInput:^{ [self cancelActiveHostInput]; }];
+    _sessionTrackpadOverrideEnabled = enabled;
+    if (configuredTouchProfile) [self updateTouchHandlerWithProfile:configuredTouchProfile];
+}
+
 
 - (void)dealloc{
     NSLog(@"dealloc streamView %f", CACurrentMediaTime());

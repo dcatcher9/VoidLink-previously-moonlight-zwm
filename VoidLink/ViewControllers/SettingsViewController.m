@@ -17,6 +17,9 @@
 #import "VoidLink-Swift.h"
 #import "Connection.h"
 #import "Plot.h"
+#import "SunlightMachineControlsSettings.h"
+#import "SunlightUITheme.h"
+#import "SunlightMoonlightIcons.h"
 
 #import <UIKit/UIGestureRecognizerSubclass.h>
 
@@ -25,6 +28,57 @@
 @interface SettingsViewController () <MenuSectionDelegate, WidgetPickerViewControllerDelegate, UIScrollViewDelegate>
 @property(nonatomic, assign) SettingsMenuMode currentSettingsMenuMode;
 @end
+
+// SUNLIGHT_GLOBAL_QUALITY_MIGRATION_BEGIN
+// A displayed control may normalize a legacy value just by opening. Require
+// both an edited selection and a changed saved tuple before removing old keys.
+static BOOL SLClearLegacyGlobalQualityOverridesIfEdited(NSUserDefaults *defaults,
+                                                       NSArray *openingSelection,
+                                                       NSArray *selectedSelection,
+                                                       NSArray *storedQuality,
+                                                       NSArray *selectedQuality) {
+    if (!openingSelection || [openingSelection isEqualToArray:selectedSelection] ||
+        [storedQuality isEqualToArray:selectedQuality]) return NO;
+    for (NSString *key in @[@"sunlight.streamQuality.2d", @"sunlight.streamQuality.host3d", @"sunlight.streamQuality.raw3d"]) {
+        [defaults removeObjectForKey:key];
+    }
+    return YES;
+}
+// SUNLIGHT_GLOBAL_QUALITY_MIGRATION_END
+
+// SUNLIGHT_CATEGORY_EDITED_VALUES_BEGIN
+static NSDictionary<NSString *, NSNumber *> *SLCategoryEditedValues(NSDictionary<NSString *, NSNumber *> *opening,
+                                                                  NSDictionary<NSString *, NSNumber *> *selected) {
+    NSMutableDictionary *edited = [NSMutableDictionary dictionary];
+    for (NSString *key in selected) {
+        if (opening[key] && ![opening[key] isEqualToNumber:selected[key]]) edited[key] = selected[key];
+    }
+    return edited;
+}
+// SUNLIGHT_CATEGORY_EDITED_VALUES_END
+
+// SUNLIGHT_FLAT_GLOBAL_QUALITY_BEGIN
+// Persist only the quality controls the user changed. A 90-fps legacy value or
+// a bitrate between slider notches must survive editing a different field.
+static NSDictionary<NSString *, NSNumber *> *SLFlatGlobalQualityEdits(NSArray<NSNumber *> *opening,
+                                                                    NSArray<NSNumber *> *selected,
+                                                                    NSDictionary<NSString *, NSNumber *> *values) {
+    if (opening.count != 8 || selected.count != 8) return @{};
+    NSMutableDictionary *edited = [NSMutableDictionary dictionary];
+    BOOL resolutionEdited = NO;
+    for (NSUInteger i = 0; i < 3; i++) resolutionEdited |= ![opening[i] isEqualToNumber:selected[i]];
+    // Changing interpolation scaling deliberately changes the requested canvas.
+    if (opening[5].boolValue || selected[5].boolValue) {
+        for (NSUInteger i = 5; i < 8; i++) resolutionEdited |= ![opening[i] isEqualToNumber:selected[i]];
+    }
+    if (resolutionEdited) {
+        for (NSString *key in @[@"width", @"height", @"resolutionSelected"]) if (values[key]) edited[key] = values[key];
+    }
+    if (![opening[3] isEqualToNumber:selected[3]] && values[@"framerate"]) edited[@"framerate"] = values[@"framerate"];
+    if (![opening[4] isEqualToNumber:selected[4]] && values[@"bitrate"]) edited[@"bitrate"] = values[@"bitrate"];
+    return edited;
+}
+// SUNLIGHT_FLAT_GLOBAL_QUALITY_END
 
 @implementation SettingsViewController {
     TemporarySettings* tempSettings;
@@ -38,10 +92,23 @@
 
     NSInteger _bitrate;
     NSInteger _lastSelectedResolutionIndex;
+    NSArray<NSNumber *> *_globalQualitySelectionAtLastSave;
+    NSDictionary<NSString *, NSNumber *> *_globalCategoryBaseline;
+    NSDictionary<NSString *, NSNumber *> *_globalCategoryProfileBaseline;
+    MenuSectionView *_globalCategorySection;
+    NSMutableDictionary<NSString *, MenuSectionView *> *_globalSettingsSections;
+    UISegmentedControl *_globalControlModeSelector;
+    UISwitch *_globalTouchEnabledSwitch;
+    NSDictionary<NSString *, NSNumber *> *_globalControlsBaseline;
+    NSArray<NSNumber *> *_flatGlobalFrameRates;
+    UILabel *_globalScopeLabel;
+    UILabel *_globalControlsExplanationLabel;
     CGFloat softKeyboardHeight;
     bool settingsViewJustLoaded;
     bool settingsViewJustExpanded;
     bool settingsViewAlreadyAppeared;
+    NSInteger _loadedExternalDisplayMode;
+    id _externalDisplayPreferenceObserver;
     uint16_t oswLayoutFingers;
     CustomEdgeSlideGestureRecognizer *slideToCloseSettingsViewRecognizer;
     NSMutableDictionary *_settingStackDict;
@@ -68,6 +135,10 @@
 
 @dynamic overrideUserInterfaceStyle;
 @synthesize controllerNavigationHighlightOverlayView = _controllerNavigationHighlightOverlayView;
+
+- (BOOL)isFlatGlobalSettings {
+    return [self.globalCategoryIdentifier isEqualToString:@"all"];
+}
 
 - (MenuSectionView *)touchControlSection {
     return touchControlSection;
@@ -268,6 +339,27 @@ CMVideoDimensions resolutionTable[RESOLUTION_TABLE_SIZE];
 // This view is rooted at a ScrollView. To make it scrollable,
 // we'll update content size here.
 -(void)viewDidLayoutSubviews {
+    if (self.globalCategoryIdentifier) {
+        BOOL explanationWidthChanged = NO;
+        for (MenuSectionView *section in _globalSettingsSections.allValues) {
+            CGFloat requiredHeaderHeight = MAX(37, section.titleLabel.font.lineHeight + 12);
+            if (fabs(section.headerViewHeight - requiredHeaderHeight) > 0.5) {
+                [self updateGlobalSectionHeaderLayout:section];
+                explanationWidthChanged = YES;
+            }
+        }
+        for (UILabel *label in @[_globalScopeLabel ?: (id)NSNull.null, _globalControlsExplanationLabel ?: (id)NSNull.null]) {
+            if (![label isKindOfClass:UILabel.class]) continue;
+            CGFloat width = CGRectGetWidth(label.superview.bounds);
+            if (width > 0 && fabs(label.preferredMaxLayoutWidth - width) > 0.5) {
+                label.preferredMaxLayoutWidth = width;
+                explanationWidthChanged = YES;
+            }
+        }
+        if (explanationWidthChanged) {
+            for (MenuSectionView *section in _globalSettingsSections.allValues) [section updateViewForFoldState];
+        }
+    }
     CGFloat highestViewY = 0;
     
     // Enumerate the scroll view's subviews looking for the
@@ -291,7 +383,8 @@ CMVideoDimensions resolutionTable[RESOLUTION_TABLE_SIZE];
     }
     
     // Add a bit of padding so the view doesn't end right at the button of the display
-    self.scrollView.contentSize = CGSizeMake(self.scrollView.contentSize.width, _parentStack.frame.size.height + GenericUtils.settingsMenuNavigationBarHeight + 20);
+    CGFloat contentWidth = self.globalCategoryIdentifier ? CGRectGetWidth(self.scrollView.bounds) : self.scrollView.contentSize.width;
+    self.scrollView.contentSize = CGSizeMake(contentWidth, _parentStack.frame.size.height + GenericUtils.settingsMenuNavigationBarHeight + 20);
     double delayInSeconds = 3;
     // Convert the delay into a dispatch_time_t value
     dispatch_time_t delayTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayInSeconds * NSEC_PER_SEC));
@@ -333,8 +426,11 @@ BOOL isCustomResolution(int resolutionSelected) {
     if(self.mainFrameViewController.settingsExpandedInStreamView) return;
 
     NSInteger externalDisplayMode = self.externalDisplayModeSelector.selectedSegmentIndex;
-    // 调用主界面方法统一填充 resolutionTable
+    // The shared preset builder may rotate its custom entry with the screen.
+    // Flat Global represents the stored or explicitly entered dimensions exactly.
+    CMVideoDimensions customDimensions = resolutionTable[RESOLUTION_TABLE_CUSTOM_INDEX];
     [self.mainFrameViewController fillResolutionTable:resolutionTable externalDisplayMode:externalDisplayMode];
+    if ([self isFlatGlobalSettings]) resolutionTable[RESOLUTION_TABLE_CUSTOM_INDEX] = customDimensions;
 
     [self updateResolutionDisplayLabel];
 }
@@ -452,6 +548,10 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void)saveGameProfileConfigs{
+    if (self.globalCategoryIdentifier) {
+        [self saveGlobalCategorySettings];
+        return;
+    }
     
     CGFloat touchPointerVelocityFactorPercent = [self map_velocFactorDisplay_fromSliderValue:self.touchPointerVelocityFactorSlider.value];
     CGFloat yawSensitivityPercent = [self map_velocFactorDisplay_fromSliderValue:self.yawSensitivitySlider.value];
@@ -535,6 +635,7 @@ BOOL isCustomResolution(int resolutionSelected) {
 
 - (void)viewWillAppear:(BOOL)animated{
     [super viewWillAppear:NO];
+    [self reloadExternalDisplayPreference];
 
     settingsViewJustExpanded = true;
 
@@ -585,7 +686,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         else dispatch_async(dispatch_get_main_queue(), ^{[self widget:self.bitrateSlider setEnabled:true];});
     });
     
-    if(self.currentSettingsMenuMode == AllSettings && MenuSectionView.overridePersistedFoldState){
+    if(!self.globalCategoryIdentifier && self.currentSettingsMenuMode == AllSettings && MenuSectionView.overridePersistedFoldState){
         for(UIView *subview in _parentStack.arrangedSubviews){
             if([subview isKindOfClass:[MenuSectionView class]]){
                 MenuSectionView* section = (MenuSectionView* )subview;
@@ -594,7 +695,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         }
     }
     
-    if(![self manuallyChangedFPS]) [self framerateChanged];
+    if(![self isFlatGlobalSettings] && ![self manuallyChangedFPS]) [self framerateChanged];
     
     /*
     // self->motionControlSection.expandable = [self isCustomOswEnabled];
@@ -629,7 +730,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     
     self->tempSettings = [self->dataMan getSettings];
     
-    if(!settingsViewAlreadyAppeared){
+    if(!settingsViewAlreadyAppeared && !self.globalCategoryIdentifier){
         _scrollView.contentOffset = CGPointMake(_scrollView.contentOffset.x, tempSettings.settingsMenuOffset.floatValue);
         _scrollView.hidden = true;
     }
@@ -645,17 +746,20 @@ BOOL isCustomResolution(int resolutionSelected) {
     [self.customResolutionSwitch addTarget:self action:@selector(customResolutionSwitched:) forControlEvents:UIControlEventValueChanged];
     [self.customResolutionSwitch setOn: isCustomResolution(self->tempSettings.resolutionSelected.intValue)];
     [self.resolutionSelector setEnabled:!self.customResolutionSwitch.isOn];
+    if ([self isFlatGlobalSettings] && !settingsViewAlreadyAppeared) [self configureFlatGlobalSavedResolution];
     
     [self touchModeChanged:self.touchModeSelector1]; // a special fix for iOS 14 to set hidden for the "enableOswStack"
     
     if(!settingsViewAlreadyAppeared) {
-        if(![self contentOffsetRestored]) _scrollView.contentOffset = CGPointMake(_scrollView.contentOffset.x, tempSettings.settingsMenuOffset.floatValue);
-        dispatch_async(dispatch_get_main_queue(), ^{
+        if(!self.globalCategoryIdentifier && ![self contentOffsetRestored]) _scrollView.contentOffset = CGPointMake(_scrollView.contentOffset.x, tempSettings.settingsMenuOffset.floatValue);
+        void (^finishInitialLayout)(void) = ^{
             [self.view layoutIfNeeded];
             [self updateResolutionTable];
             [self updateInterpolationLevelSliderWithMaximumDimension:self->tempSettings.interpolationMaximumDimension.integerValue];
             [self.streamDimensionScaleSlider sendActionsForControlEvents:UIControlEventValueChanged];
-        });
+        };
+        if (self.globalCategoryIdentifier) finishInitialLayout();
+        else dispatch_async(dispatch_get_main_queue(), finishInitialLayout);
     }
     if(@available(iOS 13.0, *)) if(ControllerUtil.primaryGCController) [self restoreControllerNavigationHighlight];
     
@@ -663,17 +767,27 @@ BOOL isCustomResolution(int resolutionSelected) {
     
     settingsViewJustExpanded = false;
     settingsViewAlreadyAppeared = true;
+    if (self.globalCategoryIdentifier && !_globalCategoryBaseline) {
+        _globalCategoryBaseline = [self globalCategoryValues];
+        _globalCategoryProfileBaseline = [self globalCategoryProfileValues];
+        if ([self isFlatGlobalSettings]) _globalControlsBaseline = [self globalControlDefaultValues];
+    }
+    if (!_globalQualitySelectionAtLastSave) {
+        _globalQualitySelectionAtLastSave = [self isFlatGlobalSettings] ? [self flatGlobalQualitySelection] : [self globalQualitySelection];
+    }
     
     if (@available(iOS 13.0, *)) if(ControllerNavigator.radialMenuView.superview) [ControllerNavigator updateRadialMenu];
 }
 
 - (void)viewWillDisappear:(BOOL)animated{
     [super viewWillDisappear:animated];
+    if (self.globalCategoryIdentifier) [self saveGlobalCategorySettings];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)viewDidDisappear:(BOOL)animated{
     [super viewDidDisappear:NO];
+    if (self.globalCategoryIdentifier) return;
     [[NSNotificationCenter defaultCenter] postNotificationName:@"SettingsViewClosedNotification" object:self]; // notify other view that settings view just closed
     
     bool unlockDisplayOrientationFlipped = tempSettings.unlockDisplayOrientation != (_unlockDisplayOrientationSelector.selectedSegmentIndex == 1);
@@ -716,7 +830,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     if(!_parentStack.superview){
         [self.scrollView addSubview:_parentStack];
         [NSLayoutConstraint activateConstraints:@[
-            [_parentStack.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant: self.currentSettingsMenuMode == AllSettings ? GenericUtils.settingsMenuNavigationBarHeight : GenericUtils.settingsMenuNavigationBarHeight+10],
+            [_parentStack.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant: self.globalCategoryIdentifier ? 12 : (self.currentSettingsMenuMode == AllSettings ? GenericUtils.settingsMenuNavigationBarHeight : GenericUtils.settingsMenuNavigationBarHeight+10)],
             [_parentStack.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-20],
         ]];
     }
@@ -881,6 +995,210 @@ BOOL isCustomResolution(int resolutionSelected) {
     if(stack.hasDynamicLabel) [self addDynamicLabelForStack:stack];
     [menuSection addSubStackView:stack];
 }
+
+- (void)addSettingsSection:(MenuSectionView *)section {
+    if (self.globalCategoryIdentifier) {
+        if (![self isFlatGlobalSettings] && ![section.identifier isEqualToString:self.globalCategoryIdentifier]) return;
+        if (!_globalSettingsSections) _globalSettingsSections = [NSMutableDictionary dictionary];
+        _globalSettingsSections[section.identifier] = section;
+        section.usesAvailableWidthForSizing = [self isFlatGlobalSettings];
+        _globalCategorySection = section;
+        // Standalone settings never read or write the old sidebar's fold state.
+        section.identifier = nil;
+    }
+    [section addToParentStack:_parentStack];
+}
+
+- (SunlightMachineControlsSettings *)globalControlDefaults {
+    SunlightMachineControlsSettings *fallback = [[SunlightMachineControlsSettings alloc] init];
+    id trackpad = [NSUserDefaults.standardUserDefaults objectForKey:@"sunlight.preferTrackpad"];
+    fallback.controlMode = ![trackpad isKindOfClass:NSNumber.class] || [trackpad boolValue]
+        ? SunlightMachineControlModeTrackpad : SunlightMachineControlModeSavedTouchProfile;
+    return [SunlightMachineControlsSettings globalControlsWithDefaults:NSUserDefaults.standardUserDefaults fallback:fallback];
+}
+
+- (UIStackView *)globalControlRowWithTitle:(NSString *)title control:(UIView *)control identifier:(NSString *)identifier {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = title;
+    label.textColor = UIColor.labelColor;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    label.adjustsFontForContentSizeCategory = YES;
+    label.numberOfLines = 0;
+    [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[label, control]];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 16;
+    row.accessibilityIdentifier = identifier;
+    control.accessibilityLabel = title;
+    control.accessibilityIdentifier = [identifier stringByAppendingString:@".control"];
+    [row.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    return row;
+}
+
+- (void)addGlobalControlDefaultsSection {
+    SunlightMachineControlsSettings *controls = [self globalControlDefaults];
+    MenuSectionView *section = [[MenuSectionView alloc] init];
+    section.delegate = self;
+    section.identifier = @"SettingsSectionControlDefaults";
+    section.sectionTitle = NSLocalizedString(@"Control defaults", nil);
+    [section setSectionWithIcon:[UIImage systemImageNamed:@"hand.draw"] size:23 sizeConstraint:-11];
+    _globalControlModeSelector = [[UISegmentedControl alloc] initWithItems:@[
+        NSLocalizedString(@"Trackpad", nil), NSLocalizedString(@"Saved profile", nil), NSLocalizedString(@"Gamepad", nil)]];
+    _globalControlModeSelector.selectedSegmentIndex = controls.controlMode;
+    [_globalControlModeSelector.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [section addSubStackView:[self globalControlRowWithTitle:NSLocalizedString(@"Control mode", nil)
+        control:_globalControlModeSelector identifier:@"global.settings.control-mode"]];
+    _globalTouchEnabledSwitch = [[UISwitch alloc] init];
+    _globalTouchEnabledSwitch.on = controls.touchEnabled;
+    [section addSubStackView:[self globalControlRowWithTitle:NSLocalizedString(@"Touch enabled", nil)
+        control:_globalTouchEnabledSwitch identifier:@"global.settings.touch-enabled"]];
+    UILabel *explanation = [[UILabel alloc] init];
+    _globalControlsExplanationLabel = explanation;
+    explanation.text = NSLocalizedString(@"Defaults for PCs without their own controls. Saved profile uses the profile selected in Pad settings. Touch off leaves hardware mouse and keyboard available.", nil);
+    explanation.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    explanation.adjustsFontForContentSizeCategory = YES;
+    explanation.textColor = SunlightUITheme.secondaryTextColor;
+    explanation.accessibilityIdentifier = @"global.settings.controls-explanation";
+    explanation.numberOfLines = 0;
+    [section addSubStackView:[[UIStackView alloc] initWithArrangedSubviews:@[explanation]]];
+    [self addSettingsSection:section];
+}
+
+- (void)configureFlatGlobalSavedResolution {
+    int32_t width = tempSettings.width.intValue;
+    int32_t height = tempSettings.height.intValue;
+    if (width <= 0 || height <= 0) return;
+    NSInteger index = tempSettings.resolutionSelected.integerValue;
+    BOOL matchingPreset = index >= 0 && index < self.resolutionSelector.numberOfSegments &&
+        resolutionTable[index].width == width && resolutionTable[index].height == height;
+    resolutionTable[RESOLUTION_TABLE_CUSTOM_INDEX] = (CMVideoDimensions){width, height};
+    self.customResolutionSwitch.on = !matchingPreset;
+    if (matchingPreset) self.resolutionSelector.selectedSegmentIndex = index;
+    self.resolutionSelector.enabled = matchingPreset;
+    // The opening baseline is captured after this display-only mapping. A
+    // frame-rate or bitrate edit therefore keeps the saved preset field intact.
+    [self updateResolutionDisplayLabel];
+}
+
+- (void)configureFlatGlobalValueControls {
+    // Keep the original codec indices intact and add Auto after them. The old
+    // sidebar maps Auto onto a concrete codec; this page must preserve it.
+    [self.codecSelector removeAllSegments];
+    NSArray *codecs = @[@"H.264", @"HEVC", @"AV1", NSLocalizedString(@"Auto", nil)];
+    for (NSUInteger i = 0; i < codecs.count; i++) [self.codecSelector insertSegmentWithTitle:codecs[i] atIndex:i animated:NO];
+    self.codecSelector.selectedSegmentIndex = tempSettings.preferredCodec >= CODEC_PREF_H264 && tempSettings.preferredCodec <= CODEC_PREF_AV1
+        ? tempSettings.preferredCodec - 1 : 3;
+    self.codecSelector.accessibilityIdentifier = @"global.settings.codec";
+    // Display the saved flags exactly. Device compatibility affects a stream's
+    // effective configuration, not unrelated edits on this defaults page.
+    self.hdrSwitch.on = tempSettings.enableHdr;
+    self.fullColorRangeSwitch.on = tempSettings.fullColorRange;
+    self.yuv444Switch.on = tempSettings.enableYUV444;
+    [self updateCodecDependentSwitches];
+
+    NSMutableArray<NSNumber *> *rates = [NSMutableArray arrayWithArray:@[@30, @60, @120]];
+    NSNumber *savedRate = tempSettings.framerate;
+    if (savedRate.integerValue > 0 && savedRate.integerValue <= 240 && ![rates containsObject:savedRate]) [rates addObject:savedRate];
+    _flatGlobalFrameRates = [rates copy];
+    [self.framerateSelector removeAllSegments];
+    for (NSUInteger i = 0; i < rates.count; i++) [self.framerateSelector insertSegmentWithTitle:[NSString stringWithFormat:@"%@ FPS", rates[i]] atIndex:i animated:NO];
+    NSUInteger selectedRate = [rates indexOfObject:savedRate];
+    self.framerateSelector.selectedSegmentIndex = selectedRate == NSNotFound ? 1 : selectedRate;
+    self.framerateSelector.accessibilityIdentifier = @"global.settings.framerate";
+    _bitrate = tempSettings.bitrate.integerValue;
+    [self.bitrateSlider setValue:[self getSliderValueForBitrate:_bitrate] animated:NO];
+    self.bitrateSlider.accessibilityIdentifier = @"global.settings.bitrate";
+    [self updateBitrateText];
+}
+
+- (void)configureGlobalCategoryPresentation {
+    if (!self.globalCategoryIdentifier) return;
+    self.navigationBar.hidden = YES;
+    self.view.backgroundColor = SunlightUITheme.surfaceColor;
+    self.scrollView.backgroundColor = SunlightUITheme.surfaceColor;
+    // Both storyboards use this scroll view as the controller's root view.
+    // UINavigationController supplies its frame and automatic safe-area inset.
+    self.scrollView.contentOffset = CGPointZero;
+    BOOL flat = [self isFlatGlobalSettings];
+    self.scrollView.accessibilityIdentifier = flat ? @"global.settings.flat" : [@"global.category." stringByAppendingString:self.globalCategoryIdentifier];
+    self.navigationItem.backBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:NSLocalizedString(@"Back", nil) style:UIBarButtonItemStylePlain target:nil action:nil];
+
+    // Streaming defaults has sole ownership of these controls. Physically
+    // remove them from the category so dependent visibility updates cannot
+    // reveal a second editor.
+    NSArray *sharedRows = flat ? @[@"touchModeStack2", @"rememberFoldStateStack", @"appThemeStack"] :
+        @[@"resolutionStack", @"fpsStack", @"bitrateStack", @"codecStack", @"hdrStack", @"framePacingStack", @"audioConfigStack", @"audioOnPcStack", @"fullColorRangeStack", @"touchModeStack2"];
+    for (NSString *identifier in sharedRows) {
+        UIStackView *stack = _settingStackDict[identifier];
+        for (MenuSectionView *section in _globalSettingsSections.allValues) {
+            if (stack && [section.subStackViews containsObject:stack]) [section removeSubStackView:stack];
+        }
+    }
+    if (flat || [self.globalCategoryIdentifier isEqualToString:@"SettingsSectionGestures"]) {
+        MenuSectionView *keyboard = _globalSettingsSections[@"SettingsSectionGestures"];
+        for (UIStackView *stack in @[self.softKeyboardToolbarStack, self.softKeyboardHeightStack]) {
+            [otherSection removeSubStackView:stack];
+            [keyboard addSubStackView:stack];
+        }
+    } else if ([self.globalCategoryIdentifier isEqualToString:@"SettingsSectionOthers"]) {
+        [_globalCategorySection removeSubStackView:self.softKeyboardToolbarStack];
+        [_globalCategorySection removeSubStackView:self.softKeyboardHeightStack];
+    }
+    if (flat) {
+        [experimentalSection removeSubStackView:self.fullColorRangeStack];
+        [videoSection addSubStackView:self.fullColorRangeStack];
+        [videoSection.rootStackView insertArrangedSubview:self.fullColorRangeStack atIndex:5];
+        [self configureFlatGlobalValueControls];
+        ((UILabel *)self.resolutionSelectorStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Resolution", nil);
+        ((UILabel *)self.fpsStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Max frame rate", nil);
+        ((UILabel *)self.bitrateStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Max bitrate", nil);
+    }
+    NSDictionary *titles = @{@"SettingsSectionVideo": @"Default video & quality", @"SettingsSectionTouch&Controller": @"Touch & pointer",
+        @"SettingsSectionController": @"Controllers", @"SettingsSectionMotionControl": @"Motion controls", @"SettingsSectionPencil": @"Pencil",
+        @"SettingsSectionGestures": @"Keyboard", @"SettingsSectionPeripherals": @"Peripherals", @"SettingsSectionAudio": @"Audio defaults",
+        @"SettingsSectionOthers": @"General", @"SettingsSectionExperimental": @"Advanced", @"SettingsSectionControlDefaults": @"Control defaults"};
+    NSDictionary *symbols = @{@"SettingsSectionVideo": @"display", @"SettingsSectionTouch&Controller": @"cursorarrow",
+        @"SettingsSectionController": @"gamecontroller", @"SettingsSectionMotionControl": @"gyroscope", @"SettingsSectionPencil": @"pencil",
+        @"SettingsSectionGestures": @"keyboard", @"SettingsSectionPeripherals": @"cable.connector", @"SettingsSectionAudio": @"speaker.wave.2",
+        @"SettingsSectionOthers": @"gearshape", @"SettingsSectionExperimental": @"slider.horizontal.3", @"SettingsSectionControlDefaults": @"hand.draw"};
+    NSDictionary *moonlightIcons = @{ @"SettingsSectionVideo": @"ic_xr_mode_normal", @"SettingsSectionControlDefaults": @"ic_xr_mouse",
+        @"SettingsSectionTouch&Controller": @"ic_xr_mouse", @"SettingsSectionController": @"ic_xr_gamepad",
+        @"SettingsSectionAudio": @"ic_xr_audio", @"SettingsSectionOthers": @"ic_settings", @"SettingsSectionExperimental": @"ic_xr_diagnostics" };
+    for (NSString *identifier in _globalSettingsSections) {
+        MenuSectionView *section = _globalSettingsSections[identifier];
+        section.headerView.userInteractionEnabled = NO;
+        section.headerView.accessibilityTraits = UIAccessibilityTraitHeader;
+        section.headerView.accessibilityIdentifier = [@"global.settings.group." stringByAppendingString:identifier];
+        for (UIView *view in section.headerView.subviews) if ([view isKindOfClass:UIButton.class]) view.hidden = YES;
+        section.sectionTitle = flat ? NSLocalizedString(titles[identifier] ?: identifier, nil) : NSLocalizedString(@"Shared by all PCs", nil);
+        if (flat) section.iconImageView.image = (moonlightIcons[identifier] ? [SunlightMoonlightIcons imageNamed:moonlightIcons[identifier]] : nil)
+            ?: [UIImage systemImageNamed:symbols[identifier] ?: @"gearshape"] ?: [UIImage systemImageNamed:@"gearshape"];
+        section.titleLabel.textColor = SunlightUITheme.accentColor;
+        section.iconImageView.tintColor = SunlightUITheme.accentColor;
+        section.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+        section.titleLabel.adjustsFontForContentSizeCategory = YES;
+        [self updateGlobalSectionHeaderLayout:section];
+        [section setExpanded:YES];
+    }
+    UILabel *scope = [[UILabel alloc] init];
+    _globalScopeLabel = scope;
+    scope.text = flat ? NSLocalizedString(@"Defaults for all PCs. Each PC and app keeps its own overrides. Changes save when you leave. Profile-tagged controls edit the selected Pad profile.", nil)
+        : NSLocalizedString(@"Changes save when you leave this page. Settings marked with a profile tag belong to the selected touch or controller profile.", nil);
+    scope.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    scope.adjustsFontForContentSizeCategory = YES;
+    scope.textColor = SunlightUITheme.secondaryTextColor;
+    scope.accessibilityIdentifier = @"global.settings.scope";
+    scope.numberOfLines = 0;
+    UIStackView *scopeStack = [[UIStackView alloc] initWithArrangedSubviews:@[scope]];
+    if (flat) {
+        [videoSection addSubStackView:scopeStack];
+        [videoSection.rootStackView insertArrangedSubview:scopeStack atIndex:0];
+    }
+    else [_globalCategorySection addSubStackView:scopeStack];
+    for (MenuSectionView *section in _globalSettingsSections.allValues) [section updateViewForFoldState];
+    [self applyGlobalSettingsTheme];
+}
     
 - (void)layoutSections {
     videoSection = [[MenuSectionView alloc] init];
@@ -932,7 +1250,9 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.pipStack.hasInfoTag = YES;
     [self addSetting:self.pipStack ofId:@"pipStack" to:videoSection];
 
-    [videoSection addToParentStack:_parentStack];
+    [self addSettingsSection:videoSection];
+
+    if ([self isFlatGlobalSettings]) [self addGlobalControlDefaultsSection];
 
 
     touchControlSection = [[MenuSectionView alloc] init];
@@ -982,7 +1302,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     [self addSetting:self.buttonVisualFeedbackStack ofId:@"buttonVisualFeedbackStack" to:touchControlSection];
     [self addSetting:self.trackTouchPointStack ofId:@"trackTouchPointStack" to:touchControlSection];
 
-    [touchControlSection addToParentStack:_parentStack];
+    [self addSettingsSection:touchControlSection];
 
 
     controllerSection = [[MenuSectionView alloc] init];
@@ -1038,7 +1358,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.rightStickMinOffsetStack.hasDynamicLabel = YES;
     [self addSetting:self.rightStickMinOffsetStack ofId:@"rightStickMinOffsetStack" to:controllerSection];
 
-    [controllerSection addToParentStack:_parentStack];
+    [self addSettingsSection:controllerSection];
 
 
     motionControlSection = [[MenuSectionView alloc] init];
@@ -1096,7 +1416,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.synthPhysicalInputStack.isGameProfileSetting = YES;
     [self addSetting:self.synthPhysicalInputStack ofId:@"synthPhysicalInputStack" to:motionControlSection];
 
-    [motionControlSection addToParentStack:_parentStack];
+    [self addSettingsSection:motionControlSection];
 
 
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
@@ -1142,7 +1462,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         self.disablePencilSlideGestureStack.isGameProfileSetting = YES;
         [self addSetting:self.disablePencilSlideGestureStack ofId:@"disablePencilSlideGestureStack" to:pencilSection];
 
-        [pencilSection addToParentStack:_parentStack];
+        [self addSettingsSection:pencilSection];
     }
 
 
@@ -1157,18 +1477,17 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.softKeyboardGestureStack.hasInfoTag = YES;
     [self addSetting:self.softKeyboardGestureStack ofId:@"softKeyboardGestureStack" to:gesturesSection];
 
-    [self addSetting:self.slideToSettingsScreenEdgeStack ofId:@"slideToSettingsScreenEdgeStack" to:gesturesSection];
-    [self addSetting:self.slideToToolboxScreenEdgeStack ofId:@"slideToToolboxScreenEdgeStack" to:gesturesSection];
+    // In-stream settings and commands are reached through the controls pill.
+    // Retain stored legacy values for profile compatibility, but stop exposing
+    // preferences for gestures that no longer navigate the stream screen.
 
     self.slideToSettingsDistanceStack.hasInfoTag = YES;
     self.slideToSettingsDistanceStack.hasDynamicLabel = YES;
-    [self addSetting:self.slideToSettingsDistanceStack ofId:@"slideToSettingsDistanceStack" to:gesturesSection];
 
     self.edgeSlidingSensitivityStack.hasInfoTag = YES;
     self.edgeSlidingSensitivityStack.hasDynamicLabel = YES;
-    [self addSetting:self.edgeSlidingSensitivityStack ofId:@"edgeSlidingSensitivityStack" to:gesturesSection];
 
-    [gesturesSection addToParentStack:_parentStack];
+    [self addSettingsSection:gesturesSection];
 
 
     MenuSectionView *peripheralSection = [[MenuSectionView alloc] init];
@@ -1193,7 +1512,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.globeAsEscapeStack.hasInfoTag = YES;
     [self addSetting:self.globeAsEscapeStack ofId:@"globeAsEscapeStack" to:peripheralSection];
 
-    [peripheralSection addToParentStack:_parentStack];
+    [self addSettingsSection:peripheralSection];
 
 
     MenuSectionView *audioSection = [[MenuSectionView alloc] init];
@@ -1224,7 +1543,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     self.audioConfigStack.hasInfoTag = YES;
     [self addSetting:self.audioConfigStack ofId:@"audioConfigStack" to:audioSection];
 
-    [audioSection addToParentStack:_parentStack];
+    [self addSettingsSection:audioSection];
 
 
     otherSection = [[MenuSectionView alloc] init];
@@ -1256,7 +1575,7 @@ BOOL isCustomResolution(int resolutionSelected) {
 
     [self addSetting:self.rememberFoldStateStack ofId:@"rememberFoldStateStack" to:otherSection];
 
-    [otherSection addToParentStack:_parentStack];
+    [self addSettingsSection:otherSection];
 
 
     experimentalSection = [[MenuSectionView alloc] init];
@@ -1293,7 +1612,7 @@ BOOL isCustomResolution(int resolutionSelected) {
 
     [self addSetting:self.sendDummyEventStack ofId:@"sendDummyEventStack" to:experimentalSection];
 
-    [experimentalSection addToParentStack:_parentStack];
+    [self addSettingsSection:experimentalSection];
 }
 
 - (void)expandGamepadSection {
@@ -2118,7 +2437,8 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void)viewDidLoad {
-    
+    [super viewDidLoad];
+
     [UIView animateWithDuration:0 animations:^{
     
         self->oscProfileMan = [OSCProfilesManager sharedManager:CGRectZero];
@@ -2126,10 +2446,10 @@ BOOL isCustomResolution(int resolutionSelected) {
         self->settingStackWillBeRelocatedToLowestPosition = false;
         self->hiddenStacks = [[NSMutableSet alloc] init];
 
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"_UIConstraintBasedLayoutLogUnsatisfiable"];
+        if (![self isFlatGlobalSettings]) [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"_UIConstraintBasedLayoutLogUnsatisfiable"];
 
         UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        [self.view addGestureRecognizer:longPress];
+        if (!self.globalCategoryIdentifier) [self.view addGestureRecognizer:longPress];
 
         self->_settingStackDict = [[NSMutableDictionary alloc] init];
 
@@ -2159,7 +2479,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         self->slideToCloseSettingsViewRecognizer.immediateTriggering = true;
         self->slideToCloseSettingsViewRecognizer.delaysTouchesBegan = NO;
         self->slideToCloseSettingsViewRecognizer.delaysTouchesEnded = NO;
-        [self.view addGestureRecognizer:self->slideToCloseSettingsViewRecognizer];
+        if (!self.globalCategoryIdentifier) [self.view addGestureRecognizer:self->slideToCloseSettingsViewRecognizer];
 
         self->settingsViewJustLoaded = true;
         self->settingsViewJustExpanded = true;
@@ -2171,9 +2491,9 @@ BOOL isCustomResolution(int resolutionSelected) {
         }
 
 
-        self.currentSettingsMenuMode = self->tempSettings.settingsMenuMode.intValue;
+        self.currentSettingsMenuMode = self.globalCategoryIdentifier ? AllSettings : self->tempSettings.settingsMenuMode.intValue;
         [self loadFavoriteSettingStackIdentifiers];
-        if(self->tempSettings.settingsMenuMode.intValue == FavoriteSettings) [self switchToFavoriteSettings];
+        if(!self.globalCategoryIdentifier && self->tempSettings.settingsMenuMode.intValue == FavoriteSettings) [self switchToFavoriteSettings];
 
         // Ensure we pick a bitrate that falls exactly onto a slider notch
         self->_bitrate = bitrateTable[[self getSliderValueForBitrate:[self->tempSettings.bitrate intValue]]];
@@ -2190,6 +2510,7 @@ BOOL isCustomResolution(int resolutionSelected) {
 
         [self.resolutionSelector removeSegmentAtIndex:0 animated:NO]; // remove 360p
         [self.resolutionSelector removeSegmentAtIndex:5 animated:NO]; // remove custom segment
+        [self.resolutionSelector setTitle:NSLocalizedString(@"Native", @"Full control-device pixel resolution") forSegmentAtIndex:4];
         // iOS12 compatibility:
         self.resolutionSelector.selectedSegmentIndex = 3;
         [self.resolutionSelector setNeedsLayout];
@@ -2578,6 +2899,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         [self.enableOswForNativeTouchSwitch addTarget:self action:@selector(enableOswForNativeTouchSwitchFlipped:) forControlEvents:UIControlEventValueChanged];
 
         self.externalDisplayModeSelector.selectedSegmentIndex = self->tempSettings.externalDisplayMode.integerValue;
+        self->_loadedExternalDisplayMode = self.externalDisplayModeSelector.selectedSegmentIndex;
         self.localMousePointerModeSelector.selectedSegmentIndex = self->tempSettings.localMousePointerMode.integerValue;
         
         [self.sendDummyEventSwitch setOn:self->tempSettings.sendDummyEvent];// Load old setting
@@ -2620,6 +2942,28 @@ BOOL isCustomResolution(int resolutionSelected) {
         self->settingsViewJustLoaded = false;
     }];
 
+    [self configureGlobalCategoryPresentation];
+
+    // Use a token observer so viewWillDisappear's removeObserver:self does not
+    // leave the retained sidebar's output selector stale while Stream setup is open.
+    __weak typeof(self) weakSelf = self;
+    _externalDisplayPreferenceObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:SunlightExternalDisplayPreferenceChangedNotification object:nil
+        queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            [weakSelf reloadExternalDisplayPreference];
+        }];
+}
+
+- (void)reloadExternalDisplayPreference {
+    if (!self.externalDisplayModeSelector) return;
+    NSNumber *mode = [[[DataManager alloc] init] getSettings].externalDisplayMode;
+    _loadedExternalDisplayMode = mode ? mode.integerValue : 1;
+    self.externalDisplayModeSelector.selectedSegmentIndex = _loadedExternalDisplayMode;
+    tempSettings.externalDisplayMode = @(_loadedExternalDisplayMode);
+}
+
+- (void)dealloc {
+    if (_externalDisplayPreferenceObserver) [[NSNotificationCenter defaultCenter] removeObserver:_externalDisplayPreferenceObserver];
 }
 
 - (void)slideToSettingsScreenEdgeChanged{
@@ -3835,6 +4179,10 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void)framerateChanged{
+    if ([self isFlatGlobalSettings]) {
+        [self updateResolutionDisplayLabel];
+        return;
+    }
     NSString *key = @"manuallyChangedFPS";
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:key];
     [[NSUserDefaults standardUserDefaults] synchronize];
@@ -3848,6 +4196,10 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void) updateBitrate {
+    if ([self isFlatGlobalSettings]) {
+        [self updateBitrateText];
+        return;
+    }
     NSInteger fps = [self getChosenFrameRate];
     CMVideoDimensions dimensions = [self getChosenStreamDimensions];
     NSInteger width = dimensions.width;
@@ -4054,9 +4406,15 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void)streamDimensionScaleSliderMoved:(UISlider *)sender {
+    BOOL native = !self.customResolutionSwitch.isOn && self.resolutionSelector.selectedSegmentIndex == 4;
+    sender.enabled = !native;
+    sender.accessibilityHint = native
+        ? NSLocalizedString(@"Native uses the full device resolution. Choose a fixed resolution to scale the stream.", nil)
+        : nil;
     CMVideoDimensions dimensions = [self getChosenStreamDimensions];
     [self findDynamicLabelFromStack:self.streamDimensionScaleStack].text =
-        [NSString stringWithFormat:@"  %d × %d  ", dimensions.width, dimensions.height];
+        native ? [NSString stringWithFormat:NSLocalizedString(@"Native · %d × %d", nil), dimensions.width, dimensions.height]
+               : [NSString stringWithFormat:@"  %d × %d  ", dimensions.width, dimensions.height];
 }
 
 - (void) touchMoveEventIntervalSliderMoved:(UISlider* )sender{
@@ -4101,6 +4459,10 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (NSInteger) getChosenFrameRate {
+    if ([self isFlatGlobalSettings] && _flatGlobalFrameRates.count) {
+        NSInteger index = self.framerateSelector.selectedSegmentIndex;
+        return index >= 0 && index < (NSInteger)_flatGlobalFrameRates.count ? _flatGlobalFrameRates[index].integerValue : tempSettings.framerate.integerValue;
+    }
     switch (self.framerateSelector.selectedSegmentIndex) {
         case 0:
             return 30;
@@ -4114,6 +4476,7 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (uint32_t) getChosenCodecPreference {
+    if ([self isFlatGlobalSettings] && self.codecSelector.numberOfSegments == 4 && self.codecSelector.selectedSegmentIndex == 3) return CODEC_PREF_AUTO;
     // Auto is always the last segment
         switch (self.codecSelector.selectedSegmentIndex) {
             case 0:
@@ -4158,6 +4521,9 @@ BOOL isCustomResolution(int resolutionSelected) {
 
 - (CMVideoDimensions)getChosenStreamDimensions {
     CMVideoDimensions presetDimensions = [self getChosenPresetStreamDimensions];
+    // Native is an exact full-device request. Interpolation's optional stream
+    // scale remains available for fixed resolutions without changing Native.
+    if (!self.customResolutionSwitch.isOn && self.resolutionSelector.selectedSegmentIndex == 4) return presetDimensions;
     if (self.framePacingModeSelector.selectedSegmentIndex != FramePacingModeInterpolation) return presetDimensions;
     if (self.streamDimensionScaleSlider == nil) {
         return [FrameInterpolator
@@ -4273,6 +4639,77 @@ BOOL isCustomResolution(int resolutionSelected) {
     }
 }
 
+- (void)updateGlobalSectionHeaderLayout:(MenuSectionView *)section {
+    CGFloat headerHeight = MAX(37, section.titleLabel.font.lineHeight + 12);
+    section.headerViewHeight = headerHeight;
+    section.headerViewVerticalSpacing = 12;
+    for (NSLayoutConstraint *constraint in section.headerView.constraints) {
+        if (constraint.firstItem == section.headerView && constraint.firstAttribute == NSLayoutAttributeHeight && !constraint.secondItem) constraint.constant = headerHeight;
+    }
+    for (NSLayoutConstraint *constraint in section.constraints) {
+        if (constraint.firstItem != section.rootStackView || constraint.firstAttribute != NSLayoutAttributeTop) continue;
+        // The legacy section installs two conflicting top anchors. Standalone
+        // groups keep the section-relative one, including the header spacing.
+        if (constraint.secondItem == section.headerView) constraint.active = NO;
+        else constraint.constant = headerHeight + section.headerViewVerticalSpacing;
+    }
+}
+
+- (void)applyGlobalSettingsThemeToView:(UIView *)view {
+    if ([view isKindOfClass:UISegmentedControl.class]) {
+        [SunlightUITheme styleChoiceControl:(UISegmentedControl *)view];
+        return;
+    }
+    if ([view isKindOfClass:UISlider.class]) {
+        [SunlightUITheme styleSlider:(UISlider *)view];
+        return;
+    }
+    if ([view isKindOfClass:UISwitch.class]) {
+        [SunlightUITheme styleSwitch:(UISwitch *)view];
+        return;
+    }
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        BOOL explanatory = [label.accessibilityIdentifier isEqualToString:@"global.settings.scope"] ||
+            [label.accessibilityIdentifier isEqualToString:@"global.settings.controls-explanation"];
+        label.textColor = explanatory ? SunlightUITheme.secondaryTextColor : SunlightUITheme.primaryTextColor;
+    }
+    view.tintColor = SunlightUITheme.accentColor;
+    for (UIView *child in view.subviews) [self applyGlobalSettingsThemeToView:child];
+}
+
+- (void)applyGlobalSettingsTheme {
+    if (!self.globalCategoryIdentifier) return;
+    self.view.backgroundColor = SunlightUITheme.surfaceColor;
+    self.scrollView.backgroundColor = SunlightUITheme.surfaceColor;
+    [self applyGlobalSettingsThemeToView:self.view];
+    for (MenuSectionView *section in _globalSettingsSections.allValues) {
+        section.titleLabel.textColor = SunlightUITheme.accentColor;
+        section.iconImageView.tintColor = SunlightUITheme.accentColor;
+        section.separatorLine.backgroundColor = SunlightUITheme.borderColor;
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (self.globalCategoryIdentifier && ![previousTraitCollection.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory]) {
+        UIFont *footnote = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote compatibleWithTraitCollection:self.traitCollection];
+        _globalScopeLabel.font = footnote;
+        _globalControlsExplanationLabel.font = footnote;
+        for (MenuSectionView *section in _globalSettingsSections.allValues) {
+            section.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline compatibleWithTraitCollection:self.traitCollection];
+            [self updateGlobalSectionHeaderLayout:section];
+            [section updateViewForFoldState];
+        }
+        // UILabel applies its automatic Dynamic Type change after its parent
+        // receives the trait callback. Measure once more with the settled fonts.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (MenuSectionView *section in self->_globalSettingsSections.allValues) [section updateViewForFoldState];
+            [self.view setNeedsLayout];
+        });
+    }
+}
+
 - (void)updateTheme{
     self.view.backgroundColor = [UIColor clearColor];
     self.view.backgroundColor = ThemeManager.menuBackgroundColor;
@@ -4281,6 +4718,7 @@ BOOL isCustomResolution(int resolutionSelected) {
     [self updateThemeForSelectors:self.view];
     [self updateThemeForSliders:self.view];
     if(PublicUtils.liquidGlassEnabled) [self updateThemeForSwitches:self.view];
+    [self applyGlobalSettingsTheme];
 }
 
 - (void) frameQueueSizeSliderMoved:(UISlider* )sender {
@@ -4508,7 +4946,207 @@ BOOL isCustomResolution(int resolutionSelected) {
     }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)globalCategoryValues {
+    if (![self isFlatGlobalSettings]) return [self globalValuesForCategory:self.globalCategoryIdentifier];
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    for (NSString *category in _globalSettingsSections) [values addEntriesFromDictionary:[self globalValuesForCategory:category]];
+    [values removeObjectForKey:@"rememberFoldState"];
+    NSInteger audioIndex = self.audioConfigSelector.selectedSegmentIndex;
+    NSArray *audioModes = @[@2, @3, @6, @8];
+    [values addEntriesFromDictionary:@{@"preferredCodec": @([self getChosenCodecPreference]),
+        @"enableHdr": @(self.hdrSwitch.isOn), @"fullColorRange": @(self.fullColorRangeSwitch.isOn),
+        @"framePacingMode": @(self.framePacingModeSelector.selectedSegmentIndex),
+        @"audioConfig": audioIndex >= 0 && audioIndex < (NSInteger)audioModes.count ? audioModes[audioIndex] : tempSettings.audioConfig ?: @2,
+        @"playAudioOnPC": @(self.audioOnPcSwitch.isOn)}];
+    return values;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)globalValuesForCategory:(NSString *)category {
+    if ([category isEqualToString:@"SettingsSectionVideo"]) {
+        InterpolationResolutionConfiguration *configuration = [self getCurrentInterpolationResolutionConfiguration];
+        return @{@"enableYUV444": @(self.yuv444Switch.isOn), @"enablePIP": @(self.pipSwitch.isOn),
+            @"frameQueueSize": @((int)self.frameQueueSizeSlider.value), @"asyncFrameDequeue": @(self.asyncFrameDequeueSwitch.isOn),
+            @"interpolationMaximumDimension": @(configuration.maximumDimension),
+            @"interpolationMaximumPixelCount": @(configuration.maximumPixelCount), @"streamDimensionScale": @(self.streamDimensionScaleSlider.value)};
+    }
+    if ([category isEqualToString:@"SettingsSectionTouch&Controller"]) {
+        return @{@"touchMode": @(self.touchModeSelector1.selectedSegmentIndex),
+            @"mousePointerVelocityFactor": @((CGFloat)(uint16_t)[self map_velocFactorDisplay_fromSliderValue:self.mousePointerVelocityFactorSlider.value] / 100),
+            @"pointerVelocityModeDivider": @(self.pointerVelocityModeDividerSlider.value / 100),
+            @"touchPointerVelocityFactor": @([self map_velocFactorDisplay_fromSliderValue:self.touchPointerVelocityFactorSlider.value] / 100),
+            @"delayLeftClick": @(self.delayLeftClickSwitch.isOn), @"passthroughGestures": @(self.passthroughGesturesSwitch.isOn),
+            @"enablePinch": @(self.pinchGestureSwitch.isOn), @"ctrlDownForPinch": @(self.ctrlDownForPinchSwitch.isOn),
+            @"scrollSensitivity": @(self.scrollSensitivitySlider.value), @"pinchSensitivity": @(self.pinchSensitivitySlider.value),
+            @"onscreenControls": @(self.onScreenWidgetSelector.selectedSegmentIndex),
+            @"buttonVisualFeedback": @(self.buttonVisualFeedbackSwitch.isOn), @"touchPointTracking": @(self.trackTouchPointSwitch.isOn)};
+    }
+    if ([category isEqualToString:@"SettingsSectionController"]) {
+        return @{@"enableControllerNavigation": @(self.controllerNavigationSwitch.isOn),
+            @"streamingRadialMenuDelay": @(self.streamingRadialMenuDelaySlider.value),
+            @"controllerMousePointerVelocity": @(self.controllerMouseVelocitySlider.value), @"controllerMouseExpo": @(self.controllerMouseExpoSlider.value),
+            @"swapABXYButtons": @(self.swapAbxySwitch.isOn), @"hapticEngine": @(self.hapticEngineSelector.selectedSegmentIndex),
+            @"emulatedControllerType": @([self segmentIndexToControllerType:self.emulatedControllerTypeSelector.selectedSegmentIndex]),
+            @"gyroMode": @(self.gyroModeSelector.selectedSegmentIndex), @"gyroSensitivity": @((CGFloat)(uint16_t)self.gyroSensitivitySlider.value / 100)};
+    }
+    if ([category isEqualToString:@"SettingsSectionPencil"]) {
+        return @{@"pencilTickMode": @(self.pencilTickSelector.selectedSegmentIndex), @"pencilTickIntervalUs": @(self.pencilTickIntervalSlider.value)};
+    }
+    if ([category isEqualToString:@"SettingsSectionGestures"]) {
+        return @{@"keyboardToggleFingers": @(self.softKeyboardGestureSelector.selectedSegmentIndex == 3 ? 20 : self.softKeyboardGestureSelector.selectedSegmentIndex + 3),
+            @"showKeyboardToolbar": @(self.softKeyboardToolbarSwitch.isOn), @"softKeyboardHeight": @(self.softKeyboardHeightSwitch.isOn ? self->softKeyboardHeight : 0)};
+    }
+    if ([category isEqualToString:@"SettingsSectionPeripherals"]) {
+        return @{@"externalDisplayMode": @(self.externalDisplayModeSelector.selectedSegmentIndex),
+            @"localMousePointerMode": @(self.localMousePointerModeSelector.selectedSegmentIndex),
+            @"reverseMouseWheelDirection": @(self.reverseMouseWheelDirectionSelector.selectedSegmentIndex == 1),
+            @"btMouseSupport": @(self.citrixX1MouseSwitch.isOn), @"globeAsEscape": @(self.globeAsEscapeSwitch.isOn)};
+    }
+    if ([category isEqualToString:@"SettingsSectionAudio"]) {
+        return @{@"localVolume": @(self.localVolumeSlider.value / 100), @"redirectMic": @(self.redirectMicSwitch.isOn),
+            @"useBuiltinMic": @(self.useBuiltinMicSwitch.isOn), @"micVolume": @(self.micVolumeSlider.value / 100),
+            @"duckOtherApps": @(self.duckOtherAppSwitch.isOn), @"muteInBackground": @(self.muteInBackgroundSwitch.isOn)};
+    }
+    if ([category isEqualToString:@"SettingsSectionOthers"]) {
+        NSInteger statsLevel = self.statsOverlaySelector.selectedSegmentIndex;
+        return @{@"statsOverlayLevel": @(statsLevel), @"statsOverlayEnabled": @(statsLevel != 0),
+            @"unlockDisplayOrientation": @(self.unlockDisplayOrientationSelector.selectedSegmentIndex == 1),
+            @"backroundSessionTimer": @(self.backgroundSessionTimerSlider.value == self.backgroundSessionTimerSlider.maximumValue ? INT16_MAX : (uint32_t)self.backgroundSessionTimerSlider.value),
+            @"optimizeGames": @(self.optimizeGamesSwitch.isOn), @"multiController": @(self.multiControllerSwitch.isOn),
+            @"rememberFoldState": @(self.rememberFoldStateSwitch.isOn)};
+    }
+    if ([category isEqualToString:@"SettingsSectionExperimental"]) {
+        return @{@"relativeTouchSlideThreshold": @(self.relativeTouchSlideThresholdSlider.value),
+            @"singleTapSensitivity": @(self.singleTapSensitivitySlider.value), @"leftClickDelayMs": @(self.leftClickDelaySlider.value),
+            @"renderingBackend": @(self.renderingBackendSelector.selectedSegmentIndex),
+            @"enableGraphs": @(self.enableGraphsSwitch.isOn), @"graphOpacity": @((int)self.graphOpacityStepper.value),
+            @"sendDummyEvent": @(self.sendDummyEventSwitch.isOn)};
+    }
+    return @{};
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)globalCategoryProfileValues {
+    if (![self isFlatGlobalSettings]) return [self globalProfileValuesForCategory:self.globalCategoryIdentifier];
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    for (NSString *category in _globalSettingsSections) [values addEntriesFromDictionary:[self globalProfileValuesForCategory:category]];
+    return values;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)globalProfileValuesForCategory:(NSString *)category {
+    if ([category isEqualToString:@"SettingsSectionTouch&Controller"]) {
+        return @{@"touchMode": @(self.touchModeSelector1.selectedSegmentIndex),
+            @"pointerVelocityModeDivider": @(self.pointerVelocityModeDividerSlider.value / 100),
+            @"touchPointerVelocityFactor": @([self map_velocFactorDisplay_fromSliderValue:self.touchPointerVelocityFactorSlider.value] / 100)};
+    }
+    if ([category isEqualToString:@"SettingsSectionController"]) {
+        return @{@"dualSenseTransient": @(self.dualSenseTransientSlider.value),
+            @"physicalLeftStickMinOffset": @((int16_t)self.leftStickMinOffsetSlider.value),
+            @"physicalRightStickMinOffset": @((int16_t)self.rightStickMinOffsetSlider.value)};
+    }
+    if ([category isEqualToString:@"SettingsSectionMotionControl"]) {
+        return @{@"useBuiltinGyro": @(self.gyroSourceSelector.selectedSegmentIndex == 0), @"swapYawAndRoll": @(self.swapYawAndRollSwitch.isOn),
+            @"mapGyroTo": @(self.mapGyroToSelector.selectedSegmentIndex), @"yawPitchToRightStick": @(self.yawPitchToRightStickSwitch.isOn),
+            @"rollToLeftStick": @(self.rollToLeftStickSwitch.isOn),
+            @"gyroSensitivityYaw": @([self map_velocFactorDisplay_fromSliderValue:self.yawSensitivitySlider.value] / 100),
+            @"gyroSensitivityPitch": @([self map_velocFactorDisplay_fromSliderValue:self.pitchSensitivitySlider.value] / 100),
+            @"gyroSensitivityRoll": @([self map_velocFactorDisplay_fromSliderValue:self.rollSensitivitySlider.value] / 100),
+            @"gyroToStickMinOffset": @((int16_t)self.gyroToStickMinOffsetSlider.value),
+            @"synthesizePhysicalStick": @(self.synthPhysicalInputSwitch.isOn),
+            @"controllerGyroSwitchMode": @(self.controllerGyroSwitchButtonSetter.selectedSegmentIndex), @"reverseGyroHoldButton": @(self.reverseHoldButtonSwitch.isOn)};
+    }
+    if ([category isEqualToString:@"SettingsSectionPencil"]) {
+        return @{@"pressureCurveEnabled": @(self.pressureCurveSwitch.isOn), @"doubleTapShorcutEnabled": @(self.doubleTapShortcutSwitch.isOn),
+            @"squeezeShorcutEnabled": @(self.squeezeShortcutSwitch.isOn), @"pencilPausesNativeTouch": @(self.pencilPausesNativeTouchSwitch.isOn),
+            @"disablePencilSlideGestures": @(self.disablePencilSlideGestureSwitch.isOn), @"pencilAndHoverMode": @(self.pencilModeSelector.selectedSegmentIndex)};
+    }
+    return @{};
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)globalControlDefaultValues {
+    if (!_globalControlModeSelector || !_globalTouchEnabledSwitch) return @{};
+    return @{@"controlMode": @(_globalControlModeSelector.selectedSegmentIndex), @"touchEnabled": @(_globalTouchEnabledSwitch.isOn)};
+}
+
+- (NSArray<NSNumber *> *)flatGlobalQualitySelection {
+    return [[self globalQualitySelection] arrayByAddingObjectsFromArray:@[
+        @(self.framePacingModeSelector.selectedSegmentIndex == FramePacingModeInterpolation),
+        @(self.interpolationLevelSlider.value), @(self.streamDimensionScaleSlider.value)]];
+}
+
+- (void)saveGlobalCategorySettings {
+    if (!_globalCategoryBaseline) return;
+    NSDictionary *values = [self globalCategoryValues];
+    NSMutableDictionary *edited = [SLCategoryEditedValues(_globalCategoryBaseline, values) mutableCopy];
+    NSDictionary *profileValues = [self globalCategoryProfileValues];
+    NSDictionary *profileEdits = SLCategoryEditedValues(_globalCategoryProfileBaseline, profileValues);
+    NSArray *qualitySelection = nil;
+    NSDictionary *qualityEdits = @{};
+    if ([self isFlatGlobalSettings]) {
+        qualitySelection = [self flatGlobalQualitySelection];
+        CMVideoDimensions dimensions = [self getChosenStreamDimensions];
+        NSDictionary *quality = @{@"width": @(dimensions.width), @"height": @(dimensions.height),
+            @"framerate": @([self getChosenFrameRate]), @"bitrate": @(_bitrate),
+            @"resolutionSelected": @(self.customResolutionSwitch.isOn ? RESOLUTION_TABLE_CUSTOM_INDEX : self.resolutionSelector.selectedSegmentIndex)};
+        qualityEdits = SLFlatGlobalQualityEdits(_globalQualitySelectionAtLastSave, qualitySelection, quality);
+        [edited addEntriesFromDictionary:qualityEdits];
+    }
+    // A fresh record preserves newer defaults written by a different editor.
+    DataManager *latest = [[DataManager alloc] init];
+    NSNumber *externalMode = edited[@"externalDisplayMode"];
+    [edited removeObjectForKey:@"externalDisplayMode"];
+    if (edited[@"redirectMic"] && ![MicHandler permissionGranted]) edited[@"redirectMic"] = @NO;
+    if (edited.count) {
+        Settings *record = [latest retrieveSettings];
+        [record.managedObjectContext performBlockAndWait:^{
+            NSArray *storedQuality = @[record.width ?: @0, record.height ?: @0, record.framerate ?: @0, record.bitrate ?: @0];
+            [record setValuesForKeysWithDictionary:edited];
+            [latest saveData];
+            if (qualityEdits.count) {
+                NSArray *savedQuality = @[record.width ?: @0, record.height ?: @0, record.framerate ?: @0, record.bitrate ?: @0];
+                SLClearLegacyGlobalQualityOverridesIfEdited(NSUserDefaults.standardUserDefaults,
+                    self->_globalQualitySelectionAtLastSave, qualitySelection, storedQuality, savedQuality);
+            }
+        }];
+    }
+    if (externalMode) [latest updateExternalDisplayMode:externalMode.integerValue error:nil];
+    if (profileEdits.count) {
+        OSCProfile *profile = [oscProfileMan getSelectedProfile];
+        [profile setValuesForKeysWithDictionary:profileEdits];
+        [oscProfileMan replaceSelectedProfileWith:profile overwriteDefault:YES];
+    }
+    NSDictionary *controlValues = [self globalControlDefaultValues];
+    NSDictionary *controlEdits = SLCategoryEditedValues(_globalControlsBaseline, controlValues);
+    if ([self isFlatGlobalSettings] && controlEdits.count) {
+        SunlightMachineControlsSettings *controls = [self globalControlDefaults];
+        [controls setValuesForKeysWithDictionary:controlEdits];
+        [controls saveGlobalControlsToDefaults:NSUserDefaults.standardUserDefaults];
+    }
+    _globalCategoryBaseline = values;
+    _globalCategoryProfileBaseline = profileValues;
+    if ([self isFlatGlobalSettings]) {
+        _globalControlsBaseline = controlValues;
+        _globalQualitySelectionAtLastSave = qualitySelection;
+    }
+    if (edited.count || externalMode || profileEdits.count || controlEdits.count) {
+        if (self.globalCategorySaved) self.globalCategorySaved();
+    }
+}
+
+- (NSArray<NSNumber *> *)globalQualitySelection {
+    // Compare the user's controls, not dimensions recalculated when a display
+    // connects or resizes. A changed quality control can still produce the same
+    // saved tuple; the migration helper checks that separately.
+    BOOL custom = self.customResolutionSwitch.isOn;
+    return @[@(custom ? RESOLUTION_TABLE_CUSTOM_INDEX : self.resolutionSelector.selectedSegmentIndex),
+             @(custom ? resolutionTable[RESOLUTION_TABLE_CUSTOM_INDEX].width : 0),
+             @(custom ? resolutionTable[RESOLUTION_TABLE_CUSTOM_INDEX].height : 0),
+             @(self.framerateSelector.selectedSegmentIndex), @(_bitrate)];
+}
+
 - (void) saveSettings {
+    if (self.globalCategoryIdentifier) {
+        [self saveGlobalCategorySettings];
+        return;
+    }
     [self preSavingActions];
 
     Settings* currentSettings = [dataMan retrieveSettings];
@@ -4530,6 +5168,10 @@ BOOL isCustomResolution(int resolutionSelected) {
     NSLog(@"saveSettings %d, %ld, %ld",self.mainFrameViewController.isStreaming, width, height);
     
     NSInteger framerate = [self getChosenFrameRate];
+    NSArray *storedGlobalQuality = @[currentSettings.width ?: @0, currentSettings.height ?: @0,
+                                    currentSettings.framerate ?: @0, currentSettings.bitrate ?: @0];
+    NSArray *selectedGlobalQuality = @[@(width), @(height), @(framerate), @(_bitrate)];
+    NSArray *selectedGlobalQualityControls = [self globalQualitySelection];
 
     NSInteger audioConfig = [@[@2, @3, @6, @8][self.audioConfigSelector.selectedSegmentIndex] integerValue];
     // 2 - stereo (system)
@@ -4594,6 +5236,13 @@ BOOL isCustomResolution(int resolutionSelected) {
         resolutionSelected = RESOLUTION_TABLE_CUSTOM_INDEX;
     }
     NSInteger externalDisplayMode = self.externalDisplayModeSelector.selectedSegmentIndex;
+    if (externalDisplayMode == _loadedExternalDisplayMode) {
+        // Preserve another screen's newer choice when this selector was untouched.
+        NSNumber *latestMode = [[[DataManager alloc] init] getSettings].externalDisplayMode;
+        externalDisplayMode = latestMode ? latestMode.integerValue : 1;
+        self.externalDisplayModeSelector.selectedSegmentIndex = externalDisplayMode;
+    }
+    _loadedExternalDisplayMode = externalDisplayMode;
     NSInteger localMousePointerMode = self.localMousePointerModeSelector.selectedSegmentIndex;
     BOOL sendDummyEvent = self.sendDummyEventSwitch.isOn;
     BOOL rememberFoldState = self.rememberFoldStateSwitch.isOn;
@@ -4704,6 +5353,12 @@ BOOL isCustomResolution(int resolutionSelected) {
                       globeAsEscape:globeAsEscape
            streamingRadialMenuDelay:streamingRadialMenuDelay
               backgroundSessionTimer:backgroundSessionTimer];
+
+    SLClearLegacyGlobalQualityOverridesIfEdited(NSUserDefaults.standardUserDefaults,
+        _globalQualitySelectionAtLastSave, selectedGlobalQualityControls, storedGlobalQuality, selectedGlobalQuality);
+    if (_globalQualitySelectionAtLastSave) {
+        _globalQualitySelectionAtLastSave = selectedGlobalQualityControls;
+    }
     
     if(_bitrate >= 50000) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -4732,6 +5387,14 @@ BOOL isCustomResolution(int resolutionSelected) {
 }
 
 - (void)updateCodecDependentSwitches {
+    if ([self isFlatGlobalSettings]) {
+        // Preferences are independent defaults. Per-stream negotiation already
+        // applies device/host constraints; changing codec must not reset range.
+        [self.fullColorRangeSwitch setEnabled:YES];
+        [self.yuv444Switch setEnabled:YES];
+        [self.hdrSwitch setEnabled:[Utils hdrSupported]];
+        return;
+    }
     uint32_t codec = [self getChosenCodecPreference];
     BOOL isAV1 = (codec == CODEC_PREF_AV1);
     BOOL isH264 = (codec == CODEC_PREF_H264);

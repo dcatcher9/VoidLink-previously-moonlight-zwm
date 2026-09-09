@@ -10,16 +10,72 @@
 //
 
 #import "AppDelegate.h"
-#import "MainFrameViewController.h"
 #import "VoidLink-Swift.h"
+#import "SceneDelegate.h"
+#import "SunlightUITheme.h"
 
-@implementation AppDelegate
+NSNotificationName const SunlightPersistentStoreReadyNotification = @"SunlightPersistentStoreReady";
+
+@interface SunlightStorageErrorViewController : UIViewController
+@property (nonatomic, copy) void (^retryHandler)(void);
+@end
+
+@implementation SunlightStorageErrorViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [SunlightUITheme surfaceColor];
+    self.view.accessibilityIdentifier = @"sunlight.storage.error";
+    UILabel *title = [UILabel new];
+    title.text = NSLocalizedString(@"Cannot open saved data", nil);
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2];
+    UILabel *detail = [UILabel new];
+    detail.text = NSLocalizedString(@"Sunlight could not open its local database. Your saved PCs and settings have not been reset. Check available storage and try again.", nil);
+    detail.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    for (UILabel *label in @[title, detail]) {
+        label.textColor = [SunlightUITheme primaryTextColor]; label.numberOfLines = 0;
+        label.adjustsFontForContentSizeCategory = YES;
+    }
+    UIButton *retry = [UIButton buttonWithType:UIButtonTypeSystem];
+    [retry setTitle:NSLocalizedString(@"Retry", nil) forState:UIControlStateNormal];
+    retry.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    retry.titleLabel.adjustsFontForContentSizeCategory = YES;
+    retry.accessibilityIdentifier = @"sunlight.storage.retry";
+    retry.tintColor = [SunlightUITheme accentColor];
+    [retry.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [retry addTarget:self action:@selector(retry:) forControlEvents:UIControlEventTouchUpInside];
+    UIScrollView *scroll = [UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:scroll];
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[title, detail, retry]];
+    content.axis = UILayoutConstraintAxisVertical; content.spacing = 20; content.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:24],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-24],
+        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:24],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-24],
+        [content.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [content.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [content.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [content.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [content.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor],
+    ]];
+}
+- (void)retry:(UIButton *)sender {
+    void (^retry)(void) = self.retryHandler;
+    self.retryHandler = nil;
+    sender.enabled = NO;
+    if (retry) retry();
+}
+@end
+
+@implementation AppDelegate {
+    NSError *_persistentStoreLoadError;
+    BOOL _applicationServicesStarted;
+}
 
 @synthesize managedObjectContext = _managedObjectContext;
 @synthesize managedObjectModel = _managedObjectModel;
 @synthesize persistentStoreCoordinator = _persistentStoreCoordinator;
-
-static NSOperationQueue* mainQueue;
 
 #if TARGET_OS_TV
 static NSString* DB_NAME = @"Moonlight_tvOS.bin";
@@ -30,7 +86,11 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 #pragma mark - UISceneSession lifecycle
 
 - (UISceneConfiguration *)application:(UIApplication *)application configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession options:(UISceneConnectionOptions *)options API_AVAILABLE(ios(13.0)){
-    return [[UISceneConfiguration alloc] initWithName:@"Default Configuration" sessionRole:connectingSceneSession.role];
+    NSString *name = [SceneDelegate isExternalDisplaySessionRole:connectingSceneSession.role]
+        ? @"External Display Configuration" : @"Default Configuration";
+    UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:name sessionRole:connectingSceneSession.role];
+    configuration.delegateClass = SceneDelegate.class;
+    return configuration;
 }
 
 - (void)application:(UIApplication *)application didDiscardSceneSessions:(NSSet<UISceneSession *> *)sceneSessions API_AVAILABLE(ios(13.0)){
@@ -39,50 +99,14 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 #if !TARGET_OS_TV
 
-/*
-// orietation limitatioin test
-- (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
-    UIViewController *topController = window.rootViewController;
-    while (topController.presentedViewController) {
-        topController = topController.presentedViewController;
-    }
-    return [topController supportedInterfaceOrientations];
-}
-*/
-
-/*
-- (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
-    NSLog(@"orientation limit");
-        return UIInterfaceOrientationMaskLandscape;
-}
-*/
-
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // Override point for command tool customization after application launch (works only when user default is nil)
-    [CommandManager presetDefaultCommands];
-    [GenericUtils installSegmentedControlPreviousSelectionTracking];
-    [IAPManager shared];
-    
-    // For iOS 12 and below, we need to manually create the window
+    // iOS 13 scenes own their windows. Older iOS uses the same storage gate.
     if (@available(iOS 13.0, *)) {
-        // Scene delegate will handle window creation
     } else {
-        self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-        
-        NSString *storyboardName;
-        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-            storyboardName = @"iPad";
-        } else {
-            storyboardName = @"iPhone";
-        }
-        
-        UIStoryboard *storyboard = [UIStoryboard storyboardWithName:storyboardName bundle:nil];
-        UIViewController *initialViewController = [storyboard instantiateInitialViewController];
-        
-        self.window.rootViewController = initialViewController;
-        [self.window makeKeyAndVisible];
+        self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        [self installRootViewControllerInWindow:self.window];
     }
-    
+
     return YES;
 }
 
@@ -92,6 +116,43 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
     _shortcutCompletionHandler = completionHandler;
 }
 #endif
+
+// Kept separate from storage opening so no app controller or service can
+// construct a DataManager against a coordinator with no attached store.
+- (UIViewController *)applicationRootViewController {
+    NSString *name = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? @"iPad" : @"iPhone";
+    return [[UIStoryboard storyboardWithName:name bundle:nil] instantiateInitialViewController];
+}
+
+- (void)installRootViewControllerInWindow:(UIWindow *)window {
+    NSAssert(NSThread.isMainThread, @"Root presentation belongs to main");
+    if (self.managedObjectContext) {
+#if !TARGET_OS_TV
+        if (!_applicationServicesStarted) {
+            _applicationServicesStarted = YES;
+            [CommandManager presetDefaultCommands];
+            [GenericUtils installSegmentedControlPreviousSelectionTracking];
+            [IAPManager shared];
+        }
+#endif
+        window.rootViewController = [self applicationRootViewController];
+        [window makeKeyAndVisible];
+        [NSNotificationCenter.defaultCenter postNotificationName:SunlightPersistentStoreReadyNotification object:self];
+        return;
+    }
+    SunlightStorageErrorViewController *failure = [SunlightStorageErrorViewController new];
+    __weak typeof(self) weakSelf = self;
+    __weak UIWindow *weakWindow = window;
+    failure.retryHandler = ^{
+        typeof(self) self = weakSelf;
+        UIWindow *window = weakWindow;
+        if (!self || !window) return;
+        @synchronized (self) { self->_persistentStoreLoadError = nil; }
+        [self installRootViewControllerInWindow:window];
+    };
+    window.rootViewController = failure;
+    [window makeKeyAndVisible];
+}
 
 - (void)applicationWillResignActive:(UIApplication *)application
 {
@@ -148,16 +209,14 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 // If the context doesn't already exist, it is created and bound to the persistent store coordinator for the application.
 - (NSManagedObjectContext *)managedObjectContext
 {
-    if (_managedObjectContext != nil) {
+    @synchronized (self) {
+        if (_managedObjectContext) return _managedObjectContext;
+        NSPersistentStoreCoordinator *coordinator = self.persistentStoreCoordinator;
+        if (!coordinator) return nil;
+        _managedObjectContext = [[NSManagedObjectContext alloc] initWithConcurrencyType:NSPrivateQueueConcurrencyType];
+        _managedObjectContext.persistentStoreCoordinator = coordinator;
         return _managedObjectContext;
     }
-    
-    NSPersistentStoreCoordinator *coordinator = [self persistentStoreCoordinator];
-    if (coordinator != nil) {
-        _managedObjectContext = [[NSManagedObjectContext alloc] initWithConcurrencyType:NSPrivateQueueConcurrencyType];
-        [_managedObjectContext setPersistentStoreCoordinator:coordinator];
-    }
-    return _managedObjectContext;
 }
 
 // Returns the managed object model for the application.
@@ -173,42 +232,36 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 
 // Returns the persistent store coordinator for the application.
 // If the coordinator doesn't already exist, it is created and the application's store added to it.
+- (NSPersistentStoreCoordinator *)newPersistentStoreCoordinator {
+    return [[NSPersistentStoreCoordinator alloc] initWithManagedObjectModel:self.managedObjectModel];
+}
+
 - (NSPersistentStoreCoordinator *)persistentStoreCoordinator
 {
-    if (_persistentStoreCoordinator != nil) {
+    @synchronized (self) {
+        if (_persistentStoreCoordinator) return _persistentStoreCoordinator;
+        // A failed open is retried only by the visible Retry action. Never
+        // publish an empty coordinator or recursively retry a storage failure.
+        if (_persistentStoreLoadError) return nil;
+        NSPersistentStoreCoordinator *candidate = [self newPersistentStoreCoordinator];
+        NSDictionary *options = @{NSMigratePersistentStoresAutomaticallyOption: @YES,
+                                  NSInferMappingModelAutomaticallyOption: @YES};
+#if TARGET_OS_TV
+        NSString *storeType = NSBinaryStoreType;
+#else
+        NSString *storeType = NSSQLiteStoreType;
+#endif
+        [self preparePersistentStore];
+        NSError *error = nil;
+        if (![candidate addPersistentStoreWithType:storeType configuration:nil URL:self.getStoreURL options:options error:&error]) {
+            _persistentStoreLoadError = error ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSPersistentStoreOpenError userInfo:nil];
+            Log(LOG_E, @"Unable to open saved data (%@ %ld): %@", _persistentStoreLoadError.domain,
+                (long)_persistentStoreLoadError.code, _persistentStoreLoadError.localizedDescription);
+            return nil;
+        }
+        _persistentStoreCoordinator = candidate;
         return _persistentStoreCoordinator;
     }
-    
-    NSError *error = nil;
-    _persistentStoreCoordinator = [[NSPersistentStoreCoordinator alloc] initWithManagedObjectModel:[self managedObjectModel]];
-    NSDictionary *options = [NSDictionary dictionaryWithObjectsAndKeys:
-                             [NSNumber numberWithBool:YES], NSMigratePersistentStoresAutomaticallyOption,
-                             [NSNumber numberWithBool:YES], NSInferMappingModelAutomaticallyOption, nil];
-    NSString* storeType;
-    
-#if TARGET_OS_TV
-    // Use a binary store for tvOS since we will need exclusive access to the file
-    // to serialize into NSUserDefaults.
-    storeType = NSBinaryStoreType;
-#else
-    storeType = NSSQLiteStoreType;
-#endif
-    
-    // We must ensure the persistent store is ready to opened
-    [self preparePersistentStore];
-    
-    if (![_persistentStoreCoordinator addPersistentStoreWithType:storeType configuration:nil URL:[self getStoreURL] options:options error:&error]) {
-        // Log the error
-        Log(LOG_E, @"Critical database error: %@, %@", error, [error userInfo]);
-        
-        // Drop the database
-        [self dropDatabase];
-        
-        // Try again
-        return [self persistentStoreCoordinator];
-    }
-    
-    return _persistentStoreCoordinator;
 }
 
 #pragma mark - Application's Documents directory
@@ -217,17 +270,6 @@ static NSString* DB_NAME = @"Limelight_iOS.sqlite";
 - (NSURL *)applicationDocumentsDirectory
 {
     return [[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
-}
-
-- (void) dropDatabase
-{
-    // Delete the file on disk
-    [[NSFileManager defaultManager] removeItemAtURL:[self getStoreURL] error:nil];
-    
-#if TARGET_OS_TV
-    // Also delete the copy in the NSUserDefaults on tvOS
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:DB_NAME];
-#endif
 }
 
 - (void) preparePersistentStore

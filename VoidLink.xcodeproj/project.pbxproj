@@ -7,6 +7,20 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A90902030000000000000003 /* SunlightStreamQualitySession.m in Sources */ = {isa = PBXBuildFile; fileRef = A90902020000000000000002 /* SunlightStreamQualitySession.m */; };
+		A90900010000000000000003 /* SunlightPlatform.m in Sources */ = {isa = PBXBuildFile; fileRef = A90900010000000000000002 /* SunlightPlatform.m */; };
+		A90800080000000000000003 /* SunlightSharedSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800080000000000000002 /* SunlightSharedSettings.m */; };
+		A90800110000000000000003 /* SunlightMachineControlsSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800110000000000000002 /* SunlightMachineControlsSettings.m */; };
+		A90800130000000000000003 /* SunlightUITheme.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800130000000000000002 /* SunlightUITheme.m */; };
+		A90800140000000000000003 /* SunlightMoonlightIcons.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800140000000000000002 /* SunlightMoonlightIcons.m */; };
+		A90800090000000000000003 /* SunlightSharedSettingsViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800090000000000000002 /* SunlightSharedSettingsViewController.m */; };
+		A90800070000000000000003 /* SunlightStreamQualityProfile.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800070000000000000002 /* SunlightStreamQualityProfile.m */; };
+		A90800040000000000000003 /* SunlightInputGate.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800040000000000000002 /* SunlightInputGate.m */; };
+		A90800020000000000000003 /* SunlightControlPadView.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800020000000000000002 /* SunlightControlPadView.m */; };
+		A90800010000000000000003 /* SunlightStreamControlsView.m in Sources */ = {isa = PBXBuildFile; fileRef = A90800010000000000000002 /* SunlightStreamControlsView.m */; };
+		A90400032609040000000003 /* SBSCalibrationView.m in Sources */ = {isa = PBXBuildFile; fileRef = A90400022609040000000002 /* SBSCalibrationView.m */; };
+		A90300062609040000000006 /* ExternalDisplayViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = A90300052609040000000005 /* ExternalDisplayViewController.m */; };
+		A90300032609040000000003 /* ExternalDisplayCoordinator.m in Sources */ = {isa = PBXBuildFile; fileRef = A90300022609040000000002 /* ExternalDisplayCoordinator.m */; };
 		180E6E372E93BFDB0067C73A /* AlertControllerUtil.swift in Sources */ = {isa = PBXBuildFile; fileRef = 180E6E362E93BFDB0067C73A /* AlertControllerUtil.swift */; };
 		1817B61E2E6FD04D000D938D /* SafeTimer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1817B61D2E6FD04D000D938D /* SafeTimer.swift */; };
 		182760F72E83E2EA00EC1C5C /* DequeModule in Frameworks */ = {isa = PBXBuildFile; productRef = 182760F62E83E2EA00EC1C5C /* DequeModule */; };
@@ -82,7 +96,6 @@
 		97E20DE22E2164A9000D5DCA /* PaddedLabel.m in Sources */ = {isa = PBXBuildFile; fileRef = 97E20DDD2E2164A9000D5DCA /* PaddedLabel.m */; };
 		97E20DE32E2164A9000D5DCA /* BandwidthTracker.m in Sources */ = {isa = PBXBuildFile; fileRef = 97E20DD52E2164A9000D5DCA /* BandwidthTracker.m */; };
 		97E20DE72E216510000D5DCA /* ImGuiRenderer.mm in Sources */ = {isa = PBXBuildFile; fileRef = 97E20DE62E216510000D5DCA /* ImGuiRenderer.mm */; };
-		97E20DEA2E216532000D5DCA /* SceneDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 97E20DE92E216532000D5DCA /* SceneDelegate.m */; };
 		97E20DEE2E2165A5000D5DCA /* ImGuiPlots.mm in Sources */ = {isa = PBXBuildFile; fileRef = 97E20DED2E2165A5000D5DCA /* ImGuiPlots.mm */; };
 		97E21BB52E2186A3000D5DCA /* imgui_impl_metal.mm in Sources */ = {isa = PBXBuildFile; fileRef = 97E21BB32E2186A3000D5DCA /* imgui_impl_metal.mm */; };
 		97E21BBF2E21882D000D5DCA /* imgui_tables.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 97E21BBD2E21882D000D5DCA /* imgui_tables.cpp */; };
@@ -142,6 +155,7 @@
 		FB89462D19F646E200339C8A /* MDNSManager.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461219F646E200339C8A /* MDNSManager.m */; };
 		FB89462E19F646E200339C8A /* PairManager.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461419F646E200339C8A /* PairManager.m */; };
 		FB89462F19F646E200339C8A /* Connection.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461719F646E200339C8A /* Connection.m */; };
+		CC3100000000000000000003 /* ConnectionLifecycle.m in Sources */ = {isa = PBXBuildFile; fileRef = CC3100000000000000000002 /* ConnectionLifecycle.m */; };
 		FB89463019F646E200339C8A /* StreamConfiguration.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461919F646E200339C8A /* StreamConfiguration.m */; };
 		FB89463119F646E200339C8A /* StreamManager.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461B19F646E200339C8A /* StreamManager.m */; };
 		FB89463219F646E200339C8A /* VideoDecoderRenderer.m in Sources */ = {isa = PBXBuildFile; fileRef = FB89461D19F646E200339C8A /* VideoDecoderRenderer.m */; };
@@ -187,6 +201,39 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A90902010000000000000001 /* SunlightStreamQualitySession.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SunlightStreamQualitySession.h; sourceTree = "<group>"; };
+		A90902020000000000000002 /* SunlightStreamQualitySession.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SunlightStreamQualitySession.m; sourceTree = "<group>"; };
+		A90900020000000000000001 /* SunlightNativeResolution.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SunlightNativeResolution.h; sourceTree = "<group>"; };
+		A90900010000000000000005 /* SunlightVideoTimestamp.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SunlightVideoTimestamp.h; sourceTree = "<group>"; };
+		A90900010000000000000001 /* SunlightPlatform.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SunlightPlatform.h; sourceTree = "<group>"; };
+		A90900010000000000000002 /* SunlightPlatform.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SunlightPlatform.m; sourceTree = "<group>"; };
+		A90900010000000000000004 /* SunlightOpus.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Input/SunlightOpus.h"; sourceTree = "<group>"; };
+		A90800080000000000000001 /* SunlightSharedSettings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightSharedSettings.h"; sourceTree = "<group>"; };
+		A90800080000000000000002 /* SunlightSharedSettings.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightSharedSettings.m"; sourceTree = "<group>"; };
+		A90800110000000000000001 /* SunlightMachineControlsSettings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightMachineControlsSettings.h"; sourceTree = "<group>"; };
+		A90800130000000000000001 /* SunlightUITheme.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightUITheme.h"; sourceTree = "<group>"; };
+		A90800140000000000000001 /* SunlightMoonlightIcons.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightMoonlightIcons.h"; sourceTree = "<group>"; };
+		A90800090000000000000001 /* SunlightSharedSettingsViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightSharedSettingsViewController.h"; sourceTree = "<group>"; };
+		A90800110000000000000002 /* SunlightMachineControlsSettings.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightMachineControlsSettings.m"; sourceTree = "<group>"; };
+		A90800130000000000000002 /* SunlightUITheme.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightUITheme.m"; sourceTree = "<group>"; };
+		A90800140000000000000002 /* SunlightMoonlightIcons.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightMoonlightIcons.m"; sourceTree = "<group>"; };
+		A90800090000000000000002 /* SunlightSharedSettingsViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightSharedSettingsViewController.m"; sourceTree = "<group>"; };
+		A90800070000000000000001 /* SunlightStreamQualityProfile.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightStreamQualityProfile.h"; sourceTree = "<group>"; };
+		A90800070000000000000002 /* SunlightStreamQualityProfile.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightStreamQualityProfile.m"; sourceTree = "<group>"; };
+		A90800060000000000000001 /* SunlightGlassesModePolicy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightGlassesModePolicy.h"; sourceTree = "<group>"; };
+		A90800040000000000000001 /* SunlightInputGate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Input/SunlightInputGate.h"; sourceTree = "<group>"; };
+		A90800040000000000000002 /* SunlightInputGate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "Input/SunlightInputGate.m"; sourceTree = "<group>"; };
+		A90800020000000000000001 /* SunlightControlPadView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightControlPadView.h"; sourceTree = "<group>"; };
+		A90800020000000000000002 /* SunlightControlPadView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightControlPadView.m"; sourceTree = "<group>"; };
+		A90800010000000000000001 /* SunlightStreamControlsView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SunlightStreamControlsView.h"; sourceTree = "<group>"; };
+		A90800010000000000000002 /* SunlightStreamControlsView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "SunlightStreamControlsView.m"; sourceTree = "<group>"; };
+		A90700042609070000000004 /* SunlightStereoLayout.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Metal/SunlightStereoLayout.h; sourceTree = "<group>"; };
+		A90400022609040000000002 /* SBSCalibrationView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SBSCalibrationView.m; sourceTree = "<group>"; };
+		A90400012609040000000001 /* SBSCalibrationView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SBSCalibrationView.h; sourceTree = "<group>"; };
+		A90300052609040000000005 /* ExternalDisplayViewController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ExternalDisplayViewController.m; sourceTree = "<group>"; };
+		A90300042609040000000004 /* ExternalDisplayViewController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ExternalDisplayViewController.h; sourceTree = "<group>"; };
+		A90300022609040000000002 /* ExternalDisplayCoordinator.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ExternalDisplayCoordinator.m; sourceTree = "<group>"; };
+		A90300012609040000000001 /* ExternalDisplayCoordinator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ExternalDisplayCoordinator.h; sourceTree = "<group>"; };
 		180345E02E819877004AF36F /* libopus-sim.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libopus-sim.a"; sourceTree = "<group>"; };
 		180E6E362E93BFDB0067C73A /* AlertControllerUtil.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertControllerUtil.swift; sourceTree = "<group>"; };
 		1817B61D2E6FD04D000D938D /* SafeTimer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafeTimer.swift; sourceTree = "<group>"; };
@@ -261,7 +308,6 @@
 		84FD0B532C3134A6006B5BE5 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		9777AAF22E2CF7A400D7FBAF /* Shaders-Linear.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "Shaders-Linear.metal"; sourceTree = "<group>"; };
 		97E20DBD2E21637B000D5DCA /* SceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SceneDelegate.h; sourceTree = "<group>"; };
-		97E20DBE2E21637B000D5DCA /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
 		97E20DC62E21647A000D5DCA /* MetalConfig.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MetalConfig.h; sourceTree = "<group>"; };
 		97E20DC72E21647A000D5DCA /* MetalVideoRenderer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MetalVideoRenderer.h; sourceTree = "<group>"; };
 		97E20DC82E21647A000D5DCA /* MetalVideoRenderer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MetalVideoRenderer.m; sourceTree = "<group>"; };
@@ -284,7 +330,6 @@
 		97E20DE52E2164EE000D5DCA /* ImGuiRenderer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ImGuiRenderer.h; sourceTree = "<group>"; };
 		97E20DE62E216510000D5DCA /* ImGuiRenderer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ImGuiRenderer.mm; sourceTree = "<group>"; };
 		97E20DE82E216532000D5DCA /* SceneDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SceneDelegate.h; sourceTree = "<group>"; };
-		97E20DE92E216532000D5DCA /* SceneDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SceneDelegate.m; sourceTree = "<group>"; };
 		97E20DEC2E2165A0000D5DCA /* ImGuiPlots.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ImGuiPlots.h; sourceTree = "<group>"; };
 		97E20DED2E2165A5000D5DCA /* ImGuiPlots.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = ImGuiPlots.mm; sourceTree = "<group>"; };
 		97E21BB32E2186A3000D5DCA /* imgui_impl_metal.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = imgui_impl_metal.mm; sourceTree = "<group>"; };
@@ -390,6 +435,8 @@
 		FB89461319F646E200339C8A /* PairManager.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PairManager.h; sourceTree = "<group>"; };
 		FB89461419F646E200339C8A /* PairManager.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = PairManager.m; sourceTree = "<group>"; };
 		FB89461619F646E200339C8A /* Connection.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = Connection.h; sourceTree = "<group>"; };
+		CC3100000000000000000001 /* ConnectionLifecycle.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ConnectionLifecycle.h; sourceTree = "<group>"; };
+		CC3100000000000000000002 /* ConnectionLifecycle.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ConnectionLifecycle.m; sourceTree = "<group>"; };
 		FB89461719F646E200339C8A /* Connection.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = Connection.m; sourceTree = "<group>"; };
 		FB89461819F646E200339C8A /* StreamConfiguration.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = StreamConfiguration.h; sourceTree = "<group>"; };
 		FB89461919F646E200339C8A /* StreamConfiguration.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = StreamConfiguration.m; sourceTree = "<group>"; };
@@ -687,10 +734,38 @@
 			children = (
 				97E20DEB2E21654B000D5DCA /* Stats */,
 				97E20DE82E216532000D5DCA /* SceneDelegate.h */,
-				97E20DE92E216532000D5DCA /* SceneDelegate.m */,
+				A90900010000000000000004 /* SunlightOpus.h */,
+				A90800040000000000000001 /* SunlightInputGate.h */,
+				A90800060000000000000001 /* SunlightGlassesModePolicy.h */,
+				A90900020000000000000001 /* SunlightNativeResolution.h */,
+				A90800070000000000000001 /* SunlightStreamQualityProfile.h */,
+				A90902010000000000000001 /* SunlightStreamQualitySession.h */,
+				A90800070000000000000002 /* SunlightStreamQualityProfile.m */,
+				A90902020000000000000002 /* SunlightStreamQualitySession.m */,
+				A90800080000000000000001 /* SunlightSharedSettings.h */,
+				A90800080000000000000002 /* SunlightSharedSettings.m */,
+				A90800110000000000000001 /* SunlightMachineControlsSettings.h */,
+				A90800130000000000000001 /* SunlightUITheme.h */,
+				A90800140000000000000001 /* SunlightMoonlightIcons.h */,
+				A90800090000000000000001 /* SunlightSharedSettingsViewController.h */,
+				A90800110000000000000002 /* SunlightMachineControlsSettings.m */,
+				A90800130000000000000002 /* SunlightUITheme.m */,
+				A90800140000000000000002 /* SunlightMoonlightIcons.m */,
+				A90800090000000000000002 /* SunlightSharedSettingsViewController.m */,
+				A90800040000000000000002 /* SunlightInputGate.m */,
+				A90800020000000000000001 /* SunlightControlPadView.h */,
+				A90800020000000000000002 /* SunlightControlPadView.m */,
+				A90800010000000000000001 /* SunlightStreamControlsView.h */,
+				A90800010000000000000002 /* SunlightStreamControlsView.m */,
+				A90700042609070000000004 /* SunlightStereoLayout.h */,
+				A90400022609040000000002 /* SBSCalibrationView.m */,
+				A90400012609040000000001 /* SBSCalibrationView.h */,
+				A90300052609040000000005 /* ExternalDisplayViewController.m */,
+				A90300042609040000000004 /* ExternalDisplayViewController.h */,
+				A90300022609040000000002 /* ExternalDisplayCoordinator.m */,
+				A90300012609040000000001 /* ExternalDisplayCoordinator.h */,
 				97E20DCE2E21647A000D5DCA /* Metal */,
 				97E20DBD2E21637B000D5DCA /* SceneDelegate.h */,
-				97E20DBE2E21637B000D5DCA /* SceneDelegate.m */,
 				84D8EB932C5146AD00FC10A9 /* VoidLink-Bridging-Header.h */,
 				84FD0B492C312C0B006B5BE5 /* Localization */,
 				8454AC682C31907F00F0A302 /* iPad.storyboard */,
@@ -826,6 +901,9 @@
 			isa = PBXGroup;
 			children = (
 				FB89461619F646E200339C8A /* Connection.h */,
+				A90900010000000000000005 /* SunlightVideoTimestamp.h */,
+				CC3100000000000000000001 /* ConnectionLifecycle.h */,
+				CC3100000000000000000002 /* ConnectionLifecycle.m */,
 				FB89461719F646E200339C8A /* Connection.m */,
 				FB89461819F646E200339C8A /* StreamConfiguration.h */,
 				FB89461919F646E200339C8A /* StreamConfiguration.m */,
@@ -842,6 +920,8 @@
 		FB89461E19F646E200339C8A /* Utility */ = {
 			isa = PBXGroup;
 			children = (
+				A90900010000000000000001 /* SunlightPlatform.h */,
+				A90900010000000000000002 /* SunlightPlatform.m */,
 				18729EDD2E8BD68800101194 /* UUIDHelper.swift */,
 				2AC1E3822F507D80004F76C0 /* GenericUtils.swift */,
 				2A263D4E2FF3BA2800154DEA /* PublicUtils.swift */,
@@ -1175,6 +1255,8 @@
 				2A7113FF2F5A6C65001D852D /* UIAppView.swift in Sources */,
 				2A7114012F5A6C65001D852D /* GamepadNavigationIllustrationHud.swift in Sources */,
 				FB89462F19F646E200339C8A /* Connection.m in Sources */,
+				A90900010000000000000003 /* SunlightPlatform.m in Sources */,
+				CC3100000000000000000003 /* ConnectionLifecycle.m in Sources */,
 				FB9AFD321A7D867C00872C98 /* AppAssetRetriever.m in Sources */,
 				843E93BE2C41528700B1651F /* OrientationHelper.swift in Sources */,
 				FB4678FF1A565DAC00377732 /* WakeOnLanManager.m in Sources */,
@@ -1206,7 +1288,19 @@
 				97E21BB52E2186A3000D5DCA /* imgui_impl_metal.mm in Sources */,
 				9777AAF32E2CF7A400D7FBAF /* Shaders-Linear.metal in Sources */,
 				84FD0B512C31338D006B5BE5 /* LocalizationHelper.m in Sources */,
-				97E20DEA2E216532000D5DCA /* SceneDelegate.m in Sources */,
+				A90800040000000000000003 /* SunlightInputGate.m in Sources */,
+				A90800070000000000000003 /* SunlightStreamQualityProfile.m in Sources */,
+				A90902030000000000000003 /* SunlightStreamQualitySession.m in Sources */,
+				A90800080000000000000003 /* SunlightSharedSettings.m in Sources */,
+				A90800110000000000000003 /* SunlightMachineControlsSettings.m in Sources */,
+				A90800130000000000000003 /* SunlightUITheme.m in Sources */,
+				A90800140000000000000003 /* SunlightMoonlightIcons.m in Sources */,
+				A90800090000000000000003 /* SunlightSharedSettingsViewController.m in Sources */,
+				A90800020000000000000003 /* SunlightControlPadView.m in Sources */,
+				A90800010000000000000003 /* SunlightStreamControlsView.m in Sources */,
+				A90400032609040000000003 /* SBSCalibrationView.m in Sources */,
+				A90300062609040000000006 /* ExternalDisplayViewController.m in Sources */,
+				A90300032609040000000003 /* ExternalDisplayCoordinator.m in Sources */,
 				1817B61E2E6FD04D000D938D /* SafeTimer.swift in Sources */,
 				FBD3495019FF2174002D2A60 /* SettingsViewController.m in Sources */,
 				2B7A10022FFB000100000001 /* SettingsTouchVelocityPreview.swift in Sources */,
@@ -1551,15 +1645,16 @@
 					"$(PROJECT_DIR)/libs/FFmpeg/include",
 					"$(PROJECT_DIR)/libs/SDL2/include",
 					"$(PROJECT_DIR)/libs/opus/include/opus",
-					"$(PROJECT_DIR)/Limelight/Input/CustomOSC",
-					"$(PROJECT_DIR)/Limelight/ViewControllers/CustomOSCViewControl",
-					"$(PROJECT_DIR)/Limelight/ViewControllers/CustomOSCViewControl/Cells",
-					"$(PROJECT_DIR)/Limelight/Input",
-					"$(PROJECT_DIR)/Limelight/Localization",
+					"$(PROJECT_DIR)/VoidLink/Input/CustomOSC",
+					"$(PROJECT_DIR)/VoidLink/ViewControllers/CustomOSCViewControl",
+					"$(PROJECT_DIR)/VoidLink/ViewControllers/CustomOSCViewControl/Cells",
+					"$(PROJECT_DIR)/VoidLink/Input",
+					"$(PROJECT_DIR)/VoidLink/Localization",
 					"$(PROJECT_DIR)/third_party/imgui",
-					"$(PROJECT_DIR)/Limelight/Database",
+					"$(PROJECT_DIR)/VoidLink/Database",
 				);
-				INFOPLIST_FILE = "VoidLink/Limelight-Info.plist";
+				INFOPLIST_FILE = "$(SUNLIGHT_APP_INFO_PLIST)";
+				SUNLIGHT_APP_INFO_PLIST = "VoidLink/Limelight-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Sunlight 3D";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
@@ -1588,7 +1683,8 @@
 				MARKETING_VERSION = 0.0.1;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(PROJECT_DIR)/libs/opus/lib/iOS/libopus.a";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(PROJECT_DIR)/libs/opus/lib/iOS-Sim/libopus.a";
-				PRODUCT_BUNDLE_IDENTIFIER = com.quyang.voidlink3d.dev2026;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SUNLIGHT_BUNDLE_IDENTIFIER)";
+				SUNLIGHT_BUNDLE_IDENTIFIER = com.quyang.voidlink3d.dev2026;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1622,15 +1718,16 @@
 					"$(PROJECT_DIR)/libs/FFmpeg/include",
 					"$(PROJECT_DIR)/libs/SDL2/include",
 					"$(PROJECT_DIR)/libs/opus/include/opus",
-					"$(PROJECT_DIR)/Limelight/Input/CustomOSC",
-					"$(PROJECT_DIR)/Limelight/ViewControllers/CustomOSCViewControl",
-					"$(PROJECT_DIR)/Limelight/ViewControllers/CustomOSCViewControl/Cells",
-					"$(PROJECT_DIR)/Limelight/Input",
-					"$(PROJECT_DIR)/Limelight/Localization",
+					"$(PROJECT_DIR)/VoidLink/Input/CustomOSC",
+					"$(PROJECT_DIR)/VoidLink/ViewControllers/CustomOSCViewControl",
+					"$(PROJECT_DIR)/VoidLink/ViewControllers/CustomOSCViewControl/Cells",
+					"$(PROJECT_DIR)/VoidLink/Input",
+					"$(PROJECT_DIR)/VoidLink/Localization",
 					"$(PROJECT_DIR)/third_party/imgui",
-					"$(PROJECT_DIR)/Limelight/Database",
+					"$(PROJECT_DIR)/VoidLink/Database",
 				);
-				INFOPLIST_FILE = "VoidLink/Limelight-Info.plist";
+				INFOPLIST_FILE = "$(SUNLIGHT_APP_INFO_PLIST)";
+				SUNLIGHT_APP_INFO_PLIST = "VoidLink/Limelight-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Sunlight 3D";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
@@ -1659,7 +1756,8 @@
 				MARKETING_VERSION = 0.0.1;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(PROJECT_DIR)/libs/opus/lib/iOS/libopus.a";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(PROJECT_DIR)/libs/opus/lib/iOS-Sim/libopus.a";
-				PRODUCT_BUNDLE_IDENTIFIER = com.quyang.voidlink3d.dev2026;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SUNLIGHT_BUNDLE_IDENTIFIER)";
+				SUNLIGHT_BUNDLE_IDENTIFIER = com.quyang.voidlink3d.dev2026;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
 				SKIP_INSTALL = NO;

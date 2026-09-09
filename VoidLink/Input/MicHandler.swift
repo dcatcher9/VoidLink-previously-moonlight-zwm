@@ -18,36 +18,39 @@ public class MicHandler: NSObject {
 
     private var notificationTokens = [NSObjectProtocol]()
     private let engine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
-    private var audioSink: Any?
+    private let captureMixer = AVAudioMixerNode()
+    private let mutedMixer = AVAudioMixerNode()
     private var micInputFormat: AVAudioFormat!
+    // Capture buffers and recording admission are serialized on bufferQueue.
     private var isRecording = false
+    private var captureClosed = false
+    private let lifecycleLock = NSRecursiveLock()
+    private var isCleaned = false
+    private var wantsRecording = false
+    private var interruptionGeneration: UInt64 = 0
+    private var engineConfigured = false
+    private var inputTapInstalled = false
+    private var captureMixerAttached = false
+    private var mutedMixerAttached = false
+    private let pendingCaptureChunks = DispatchSemaphore(value: 4)
+    private let sendPacket: (Data) -> Void
     private var useBuiltinMic = false
     
     private var pcm16BufferDeque = Deque<Int16>()
-    private var pcm16BufferArray: [Int16] = []
     private let bufferQueue = DispatchQueue(label: "pcm.buffer.queue")
     private var timer: SafeTimer?
     private static var volume: Float = 1.0
+    private static let volumeLock = NSLock()
 
-    /*
-    private var recordedBuffers: [AVAudioPCMBuffer] = []
-    private var recordedPCM16: [Data] = []
-    private var recordedOpusPackets: [Data] = []
-    */
     
     private var opusEncoder: OpaquePointer?
-    private var opusDecoder: OpaquePointer?
     
-    private var sequenceNumber: UInt16 = 0
-    private let ssrc: UInt32 = 0x12345678
     
-    private var globalTimestamp: TimeInterval = 0
-
 
     public weak var delegate: MicHandlerDelegate?
 
-    @objc public init(useBuiltinMic:Bool) {
+    @objc public init(useBuiltinMic: Bool, sendPacket: @escaping (Data) -> Void) {
+        self.sendPacket = sendPacket
         super.init()
         
         let token = NotificationCenter.default.addObserver(
@@ -157,16 +160,23 @@ public class MicHandler: NSObject {
               let type = AVAudioSession.InterruptionType(rawValue: typeValue)
         else { return }
 
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !isCleaned else { return }
         switch type {
         case .began:
-            self.stopTapping(stopEngine: true)
+            let shouldResume = wantsRecording
+            stopTapping(stopEngine: true)
+            wantsRecording = shouldResume
         case .ended:
-            do {
-                try configureEngine()
-            } catch {
-                notify(error)
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            guard wantsRecording else { return }
+            let generation = interruptionGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self else { return }
+                self.lifecycleLock.lock()
+                defer { self.lifecycleLock.unlock() }
+                guard !self.isCleaned, self.wantsRecording,
+                      generation == self.interruptionGeneration else { return }
                 self.startTapping()
             }
         @unknown default:
@@ -182,11 +192,6 @@ public class MicHandler: NSObject {
 
         opusEncoder = enc
 
-        guard let dec = opus_decoder_create(sampleRate, Int32(channels), &err), err == OPUS_OK else {
-            throw NSError(domain: "Opus", code: Int(err), userInfo: nil)
-        }
-        opusDecoder = dec
-
         // Optional: But defaults are fine. Only change when needed:
         opus_encoder_ctl_wrapper(enc, Int32(OPUS_SET_BITRATE_REQUEST), opus_int32(64000))      // Set bitrate
         opus_encoder_ctl_wrapper(enc, Int32(OPUS_SET_COMPLEXITY_REQUEST), opus_int32(5))         // Set complexity
@@ -194,40 +199,41 @@ public class MicHandler: NSObject {
     }
 
     @objc public func startTapping() {
-        // recordedBuffers.removeAll()
-        isRecording = true
-        self.timer?.start()
-        /*
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self = self else { return }
-            self.isRecording = false
-            self.stop()
-            self.playbackRecorded()
-            self.playbackOpus()
-        }*/
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !isCleaned else { return }
+        do {
+            if !engineConfigured { try configureEngine() }
+            if !engine.isRunning { try engine.start() }
+        } catch {
+            notify(error)
+            return
+        }
+        wantsRecording = true
+        bufferQueue.sync { isRecording = true }
+        timer?.start()
     }
 
-    @objc public func stopTapping(stopEngine:Bool) {
-        isRecording = false
-        self.timer?.pause()
-        // engine.inputNode.removeTap(onBus: 0)
-        if(stopEngine){
-            playerNode.stop()
+    @objc public func stopTapping(stopEngine: Bool) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        wantsRecording = false
+        interruptionGeneration &+= 1
+        // Wait for any admitted packet to finish, then reject queued timer work.
+        bufferQueue.sync {
+            isRecording = false
+            pcm16BufferDeque.removeAll()
+        }
+        timer?.pause()
+        if stopEngine {
             engine.stop()
         }
     }
 
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
-        /*
-        let bluetoothAudioOption = self.useBuiltinMic ? AVAudioSession.CategoryOptions.allowBluetoothA2DP : AVAudioSession.CategoryOptions.allowBluetooth
-        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, bluetoothAudioOption])
-        
-        if #available(iOS 13.0, *) {
-            try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
-        } */
-        // AVAudioSession Initiailized in Connection.m -> ArInit
-        
+        // Connection owns AVAudioSession configuration; this capture only selects its input.
+
         // 列出所有可用输入
         if self.useBuiltinMic, let inputs = session.availableInputs {
             for port in inputs {
@@ -238,17 +244,17 @@ public class MicHandler: NSObject {
                 }
             }
         }
-        // try session.setActive(true)
     }
     
     private func sendOpusFrameFromDequeBuffer() {
         bufferQueue.sync {
+            guard isRecording, !captureClosed else { return }
             if pcm16BufferDeque.count >= 960 {
                 let chunk = Array(pcm16BufferDeque.prefix(960))
                 var packet = [UInt8](repeating: 0, count: 4000)
                 guard let enc = self.opusEncoder else {return}
                 let outBytes = opus_encode(enc, chunk, 960, &packet, Int32(packet.count))
-                sendMicrophoneOpusData(packet, outBytes)
+                if outBytes > 0 { sendPacket(Data(packet.prefix(Int(outBytes)))) }
                 let removeCount = min(960, pcm16BufferDeque.count)
                 if removeCount > 0 {
                     pcm16BufferDeque.removeFirst(removeCount)
@@ -257,289 +263,110 @@ public class MicHandler: NSObject {
         }
     }
     
-    private func sendOpusFrameFromArrayBuffer() {
-        bufferQueue.sync {
-            if pcm16BufferArray.count >= 960 {
-                let chunk = Array(pcm16BufferArray.prefix(960))
-                var packet = [UInt8](repeating: 0, count: 4000)
-                guard let enc = self.opusEncoder else {return}
-                let outBytes = opus_encode(enc, chunk, 960, &packet, Int32(packet.count))
-                sendMicrophoneOpusData(packet, outBytes)
-                let removeCount = min(960, pcm16BufferArray.count)
-                if removeCount > 0 {
-                    pcm16BufferArray.removeFirst(removeCount)
-                }
-            }
-        }
-    }
-
     @objc public static func setVolume(_ linearVolume: Float) {
         let clamped = max(0.0, min(1.5, linearVolume))
         let exponent: Float = 1.7
+        volumeLock.lock()
         MicHandler.volume = powf(clamped, exponent)
+        volumeLock.unlock()
+    }
+
+    private static func captureVolume() -> Float {
+        volumeLock.lock()
+        defer { volumeLock.unlock() }
+        return volume
     }
     
     private func configureEngine() throws {
+        guard !isCleaned, !engineConfigured else { return }
         let input = engine.inputNode
         micInputFormat = input.inputFormat(forBus: 0)
         
-        try self.configureOpus(sampleRate: Int32(micInputFormat.sampleRate), channels: Int(micInputFormat.channelCount))
-
-        if #available(iOS 13.0, tvOS 13.0, *) {
-            try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.02)
-            
-            let sinkNode = AVAudioSinkNode { timestamp, frameCount, audioBufferList -> OSStatus in
-                
-                guard self.isRecording else { return noErr}
-                
-                let abl = audioBufferList.pointee.mBuffers
-                guard let data = abl.mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-                let samples = UnsafeBufferPointer(start: data, count: Int(frameCount))
-                
-                // 转 float32 -> int16
-                var chunk = [Int16](repeating: 0, count: samples.count)
-                for i in 0..<samples.count {
-                    let clamped = max(min(samples[i] * MicHandler.volume, 1.0), -1.0)
-                    chunk[i] = Int16(clamped * Float(Int16.max))
-                }
-
-                // 追加到缓冲区
-                self.bufferQueue.sync {
-                    self.pcm16BufferDeque.append(contentsOf: chunk)
-                }
-                
-                return noErr
+        // The host microphone sink consumes 48 kHz mono. Let the audio engine
+        // resample/downmix the hardware route before buffering 960-frame Opus
+        // packets, including stereo built-in inputs and lower-rate Bluetooth.
+        guard micInputFormat.sampleRate > 0, micInputFormat.channelCount > 0,
+              let captureFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
+            throw NSError(domain: "Microphone", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "No usable microphone input format."])
+        }
+        try self.configureOpus(sampleRate: 48_000, channels: 1)
+        engine.attach(captureMixer)
+        captureMixerAttached = true
+        engine.connect(input, to: captureMixer, format: micInputFormat)
+        // A mixer tap supports format conversion. AVAudioSinkNode requires the
+        // hardware sample rate, so it cannot provide this fixed-rate contract.
+        engine.attach(mutedMixer)
+        mutedMixerAttached = true
+        mutedMixer.outputVolume = 0
+        engine.connect(captureMixer, to: mutedMixer, format: captureFormat)
+        engine.connect(mutedMixer, to: engine.mainMixerNode, format: captureFormat)
+        captureMixer.installTap(onBus: 0, bufferSize: 960, format: captureFormat) { [weak self] buffer, _ in
+            guard let self = self, let samples = buffer.floatChannelData?[0],
+                  self.pendingCaptureChunks.wait(timeout: .now()) == .success else { return }
+            // Bound both queued work and captured audio. The realtime tap never
+            // waits for encoding or the network; congestion drops older audio.
+            let sampleCount = min(Int(buffer.frameLength), 4_800)
+            let offset = Int(buffer.frameLength) - sampleCount
+            let gain = MicHandler.captureVolume()
+            var chunk = [Int16](repeating: 0, count: sampleCount)
+            for i in 0..<sampleCount {
+                let clamped = max(min(samples[offset + i] * gain, 1.0), -1.0)
+                chunk[i] = Int16(clamped * Float(Int16.max))
             }
-            
-            audioSink = sinkNode
-            engine.attach(audioSink! as! AVAudioNode)
-            engine.connect(engine.inputNode, to: audioSink as! AVAudioNode, format: micInputFormat)
-            
-            // 开定时器，每 20ms 触发一次
-            self.timer = SafeTimer(interval:0.02, delay: 0.05) {
-                self.sendOpusFrameFromDequeBuffer()
+            let capturedChunk = chunk
+            self.bufferQueue.async { [weak self] in
+                guard let self = self else { return }
+                defer { self.pendingCaptureChunks.signal() }
+                guard self.isRecording, !self.captureClosed else { return }
+                let overflow = self.pcm16BufferDeque.count + capturedChunk.count - 4_800
+                if overflow > 0 { self.pcm16BufferDeque.removeFirst(overflow) }
+                self.pcm16BufferDeque.append(contentsOf: capturedChunk)
             }
         }
-        else{
-            engine.attach(playerNode)
-            engine.connect(playerNode, to: engine.mainMixerNode, format: micInputFormat)
-            input.installTap(onBus: 0, bufferSize: 5760, format: micInputFormat) { [weak self] buffer, _ in
-                guard let self = self, self.isRecording else { return }
-                
-                // ===============================
-                // 把 buffer 转成 PCM16 并保存
-                let frameLength = Int(buffer.frameLength)
-                let channels = Int(buffer.format.channelCount)
-                var pcm16InterleavedBuffer = [Int16](repeating: 0, count: frameLength * channels)
-
-                if let floatPtrs = buffer.floatChannelData {
-                    for ch in 0..<channels {
-                        let floatPtr = floatPtrs[ch]
-                        for i in 0..<frameLength {
-                            let f = floatPtr[i] * MicHandler.volume
-                            // 把 float 转到 Int16 范围：假设 float 在 -1…+1 之间
-                            // 乘以 Int16.max (32767)，再做裁剪
-                            let scaled = f * Float(Int16.max)
-                            let clipped: Float
-                            if scaled > Float(Int16.max) {
-                                clipped = Float(Int16.max)
-                            } else if scaled < Float(Int16.min) {
-                                clipped = Float(Int16.min)
-                            } else {
-                                clipped = scaled
-                            }
-                            pcm16InterleavedBuffer[i * channels + ch] = Int16(clipped)
-                        }
-                    }
-                }
-
-                // 现在 pcm16InterleavedBuffer 里就是转换后的 Int16 数据
-                self.bufferQueue.sync {
-                    self.pcm16BufferArray.append(contentsOf: pcm16InterleavedBuffer)
-                }
-            }
-            
-            // 开定时器，每 20ms 触发一次
-            self.timer = SafeTimer(interval:0.02, delay: 0.05) {
-                self.sendOpusFrameFromArrayBuffer()
-            }
+        inputTapInstalled = true
+        timer = SafeTimer(interval: 0.02, delay: 0.05) { [weak self] in
+            self?.sendOpusFrameFromDequeBuffer()
         }
-        
+
+        engineConfigured = true
         engine.prepare()
         try engine.start()
     }
     
     @objc public func clean() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !isCleaned else { return }
+        isCleaned = true
+        wantsRecording = false
+        interruptionGeneration &+= 1
+        bufferQueue.sync {
+            captureClosed = true
+            isRecording = false
+            pcm16BufferDeque.removeAll()
+        }
+        // SafeTimer.clean drains an in-flight handler before returning.
+        timer?.clean()
+        timer = nil
+        engine.stop()
+        if inputTapInstalled { captureMixer.removeTap(onBus: 0) }
+        if captureMixerAttached { engine.detach(captureMixer); captureMixerAttached = false }
+        if mutedMixerAttached { engine.detach(mutedMixer); mutedMixerAttached = false }
+        bufferQueue.sync {
+            if let encoder = opusEncoder { opus_encoder_destroy(encoder) }
+            opusEncoder = nil
+        }
         for token in notificationTokens {
             NotificationCenter.default.removeObserver(token)
         }
         notificationTokens.removeAll()
-        self.timer?.clean()
     }
-    
+
+    deinit { clean() }
+
     private func notify(_ error: Error) {
         delegate?.micHandler?(self, didFailWithError: error as NSError)
     }
 
-    // ===============================
-    // 🔹 新增播放 Opus 数据方法
-    /*
-    private func playbackOpus() {
-        guard let dec = opusDecoder else { return }
-
-        let channels = Int(micInputFormat.channelCount)
-
-        for (index, packet) in recordedOpusPackets.enumerated() {
-            let maxFrames = 5760 // 最大 120ms
-            let pcmBuf = UnsafeMutablePointer<Int16>.allocate(capacity: maxFrames * channels)
-            defer { pcmBuf.deallocate() }
-
-            let frameCount = opus_decode(dec,
-                                         [UInt8](packet),
-                                         Int32(packet.count),
-                                         pcmBuf,
-                                         Int32(maxFrames),
-                                         0)
-            if frameCount < 0 {
-                print("Opus decode error: \(frameCount)")
-                continue
-            }
-
-            // 构造源格式 AVAudioPCMBuffer (PCM16)
-            let sourceFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                             sampleRate: micInputFormat.sampleRate,
-                                             channels: micInputFormat.channelCount,
-                                             interleaved: true)!
-
-            guard let sourceBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat,
-                                                      frameCapacity: AVAudioFrameCount(frameCount)) else { continue }
-            sourceBuffer.frameLength = AVAudioFrameCount(frameCount)
-
-            // 填充 PCM16 数据到 sourceBuffer
-            let srcPointer = sourceBuffer.int16ChannelData![0]
-            for i in 0..<Int(frameCount * Int32(channels)) {
-                srcPointer[i] = pcmBuf[i]
-            }
-
-            // 准备目标 buffer (Float32)
-            guard let floatBuffer = AVAudioPCMBuffer(pcmFormat: micInputFormat,
-                                                     frameCapacity: AVAudioFrameCount(frameCount)) else { continue }
-
-            // 🔹 使用 AVAudioConverter 转换
-            let converter = AVAudioConverter(from: sourceFormat, to: micInputFormat)!
-            var error: NSError? = nil
-            let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-                outStatus.pointee = .haveData
-                return sourceBuffer
-            }
-
-            converter.convert(to: floatBuffer, error: &error, withInputFrom: inputBlock)
-            if let error = error {
-                print("AVAudioConverter error: \(error)")
-                continue
-            }
-
-            // 播放
-            if index == recordedOpusPackets.count - 1 {
-                playerNode.scheduleBuffer(floatBuffer, at: nil, options: []) { [weak self] in
-                    guard let self = self else { return }
-                    DispatchQueue.main.async {
-                        self.playerNode.stop()
-                        self.engine.stop()
-                    }
-                }
-            } else {
-                playerNode.scheduleBuffer(floatBuffer, at: nil, options: [], completionHandler: nil)
-            }
-        }
-
-        // 启动 engine
-        if !engine.isRunning {
-            do { try engine.start() } catch { print(error) }
-        }
-
-        if !playerNode.isPlaying {
-            playerNode.play()
-        }
-    }
-
-    // ===============================
-    // 🔹 改动 2：播放 PCM16 数据
-    private func playbackRecorded() {
-        do {
-            try configureEngine()
-        } catch {
-            notify(error)
-        }
-
-        let channels = Int(micInputFormat.channelCount)
-
-        for (index, pcmData) in recordedPCM16.enumerated() {
-            let frameCount = pcmData.count / (MemoryLayout<Int16>.size * channels)
-            guard let buf = AVAudioPCMBuffer(pcmFormat: micInputFormat, frameCapacity: AVAudioFrameCount(frameCount)) else { continue }
-            buf.frameLength = buf.frameCapacity
-
-            // PCM16 -> Float32
-            pcmData.withUnsafeBytes { rawBuf in
-                let pcmPtr = rawBuf.bindMemory(to: Int16.self).baseAddress!
-                for i in 0..<frameCount {
-                    for ch in 0..<channels {
-                        buf.floatChannelData?[ch][i] = Float(pcmPtr[i * channels + ch]) / Float(Int16.max)
-                    }
-                }
-            }
-
-            // 只在最后一个 buffer 设置 completionHandler
-            if index == recordedPCM16.count - 1 {
-                playerNode.scheduleBuffer(buf, at: nil, options: []) { [weak self] in
-                    guard let self = self else { return }
-                    // 🔹 回到主线程安全停止
-                    DispatchQueue.main.async {
-                        self.playerNode.stop()
-                        self.engine.stop()
-                    }
-                }
-            } else {
-                playerNode.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
-            }
-        }
-
-        playerNode.play()
-    }
-
-    private func deepCopy(_ buffer: AVAudioPCMBuffer, format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength) else { return nil }
-        out.frameLength = buffer.frameLength
-        let channels = Int(format.channelCount)
-        for ch in 0..<channels {
-            if let src = buffer.floatChannelData?[ch], let dst = out.floatChannelData?[ch] {
-                dst.update(from: src, count: Int(buffer.frameLength))
-            }
-        }
-        return out
-    }
-
-    private func merge(buffers: [AVAudioPCMBuffer], format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let total = buffers.reduce(0) { $0 + $1.frameLength }
-        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: total) else { return nil }
-        out.frameLength = total
-
-        var writePos: AVAudioFrameCount = 0
-        let channels = Int(format.channelCount)
-
-        for b in buffers {
-            let frames = Int(b.frameLength)
-            for ch in 0..<channels {
-                if let src = b.floatChannelData?[ch], let dst = out.floatChannelData?[ch] {
-                    dst.advanced(by: Int(writePos)).update(from: src, count: frames)
-                }
-            }
-            writePos += b.frameLength
-        }
-        return out
-    }
-
-     */
 }
-
-/* -------------------------------------------------------*/

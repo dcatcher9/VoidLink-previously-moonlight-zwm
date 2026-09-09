@@ -14,6 +14,23 @@
 #import "ServerInfoResponse.h"
 
 #include <dispatch/dispatch.h>
+#include <limits.h>
+
+static NSData *PairingHexData(NSString *hex) {
+    if (hex.length == 0 || hex.length % 2 != 0) return nil;
+    NSMutableData *bytes = [NSMutableData dataWithLength:hex.length / 2];
+    uint8_t *output = bytes.mutableBytes;
+    for (NSUInteger i = 0; i < hex.length; i++) {
+        unichar c = [hex characterAtIndex:i];
+        int nibble = c >= '0' && c <= '9' ? c - '0' :
+            c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+            c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (nibble < 0) return nil;
+        if ((i & 1) == 0) output[i / 2] = (uint8_t)(nibble << 4);
+        else output[i / 2] |= (uint8_t)nibble;
+    }
+    return bytes;
+}
 
 @implementation PairManager {
     HttpManager* _httpManager;
@@ -40,11 +57,14 @@
     if ([serverInfoResp isStatusOk]) {
         if (![[serverInfoResp getStringTag:@"PairStatus"] isEqual:@"1"]) {
             NSString* appversion = [serverInfoResp getStringTag:@"appversion"];
-            if (appversion == nil) {
-                [_callback pairFailed:@"Missing XML element"];
+            NSString *majorVersion = [appversion componentsSeparatedByString:@"."].firstObject;
+            NSScanner *scanner = majorVersion ? [NSScanner scannerWithString:majorVersion] : nil;
+            NSInteger major = 0;
+            if (![scanner scanInteger:&major] || !scanner.isAtEnd || major < 1 || major > INT_MAX) {
+                [_callback pairFailed:@"Host returned an invalid app version."];
                 return;
-            }            
-            [self initiatePairWithPin:PIN forServerMajorVersion:[[appversion substringToIndex:1] intValue] withState:[serverInfoResp getStringTag:@"state"]];
+            }
+            [self initiatePairWithPin:PIN forServerMajorVersion:(int)major withState:[serverInfoResp getStringTag:@"state"]];
         } else {
             [_callback alreadyPaired];
         }
@@ -92,7 +112,7 @@
     NSData* salt = [Utils randomBytes:16];
     NSData* saltedPIN = [self concatData:salt with:[PIN dataUsingEncoding:NSUTF8StringEncoding]];
 
-    Log(LOG_I, @"PIN: %@, salt %@", PIN, salt);
+    Log(LOG_I, @"Pairing request started.");
     
     HttpResponse* pairResp = [[HttpResponse alloc] init];
     [_httpManager executeRequestSynchronously:[HttpRequest requestForResponse:pairResp withUrlRequest:[_httpManager newPairRequest:salt clientCert:_clientCert]]];
@@ -113,8 +133,15 @@
         return;
     }
     
-    // Pin the cert for TLS usage on this host
-    NSData* derCertBytes = [CryptoManager pemToDer:[Utils hexToBytes:plainCert]];
+    NSData *serverCertificate = PairingHexData(plainCert);
+    NSData *derCertBytes = [CryptoManager pemToDer:serverCertificate];
+    NSData *serverCertificateSignature = [CryptoManager getSignatureFromCert:serverCertificate];
+    NSData *clientCertificateSignature = [CryptoManager getSignatureFromCert:_clientCert];
+    if (!derCertBytes || !serverCertificateSignature || !clientCertificateSignature) {
+        [self finishPairing:bgId forResponse:pairResp withFallbackError:@"Pairing certificate is invalid."];
+        return;
+    }
+    // Pin only a parsed certificate; no malformed pairing response may clear it.
     [_httpManager setServerCert:derCertBytes];
     
     CryptoManager* cryptoMan = [[CryptoManager alloc] init];
@@ -134,6 +161,10 @@
     NSData* randomChallenge = [Utils randomBytes:16];
     NSData* encryptedChallenge = [cryptoMan aesEncrypt:randomChallenge withKey:aesKey];
     
+    if (!encryptedChallenge) {
+        [self finishPairing:bgId forResponse:pairResp withFallbackError:@"Unable to create pairing challenge."];
+        return;
+    }
     HttpResponse* challengeResp = [[HttpResponse alloc] init];
     [_httpManager executeRequestSynchronously:[HttpRequest requestForResponse:challengeResp withUrlRequest:[_httpManager newChallengeRequest:encryptedChallenge]]];
     if (![self verifyResponseStatus:challengeResp]) {
@@ -141,14 +172,18 @@
         return;
     }
     
-    NSData* encServerChallengeResp = [Utils hexToBytes:[challengeResp getStringTag:@"challengeresponse"]];
+    NSData* encServerChallengeResp = PairingHexData([challengeResp getStringTag:@"challengeresponse"]);
     NSData* decServerChallengeResp = [cryptoMan aesDecrypt:encServerChallengeResp withKey:aesKey];
-    
+    if (decServerChallengeResp.length < (NSUInteger)hashLength + 16) {
+        [self finishPairing:bgId forResponse:challengeResp withFallbackError:@"Host returned an invalid pairing challenge."];
+        return;
+    }
+
     NSData* serverResponse = [decServerChallengeResp subdataWithRange:NSMakeRange(0, hashLength)];
     NSData* serverChallenge = [decServerChallengeResp subdataWithRange:NSMakeRange(hashLength, 16)];
     
     NSData* clientSecret = [Utils randomBytes:16];
-    NSData* challengeRespHashInput = [self concatData:[self concatData:serverChallenge with:[CryptoManager getSignatureFromCert:_clientCert]] with:clientSecret];
+    NSData* challengeRespHashInput = [self concatData:[self concatData:serverChallenge with:clientCertificateSignature] with:clientSecret];
     NSData* challengeRespHash;
     if (serverMajorVersion >= 7) {
         challengeRespHash = [cryptoMan SHA256HashData: challengeRespHashInput];
@@ -170,16 +205,20 @@
         return;
     }
     
-    NSData* serverSecretResp = [Utils hexToBytes:[secretResp getStringTag:@"pairingsecret"]];
+    NSData* serverSecretResp = PairingHexData([secretResp getStringTag:@"pairingsecret"]);
+    if (serverSecretResp.length <= 16) {
+        [self finishPairing:bgId forResponse:secretResp withFallbackError:@"Host returned an invalid pairing secret."];
+        return;
+    }
     NSData* serverSecret = [serverSecretResp subdataWithRange:NSMakeRange(0, 16)];
     NSData* serverSignature = [serverSecretResp subdataWithRange:NSMakeRange(16, serverSecretResp.length - 16)];
     
-    if (![cryptoMan verifySignature:serverSecret withSignature:serverSignature andCert:[Utils hexToBytes:plainCert]]) {
+    if (![cryptoMan verifySignature:serverSecret withSignature:serverSignature andCert:serverCertificate]) {
         [self finishPairing:bgId forResponse:secretResp withFallbackError:@"Server certificate invalid"];
         return;
     }
     
-    NSData* serverChallengeRespHashInput = [self concatData:[self concatData:randomChallenge with:[CryptoManager getSignatureFromCert:[Utils hexToBytes:plainCert]]] with:serverSecret];
+    NSData* serverChallengeRespHashInput = [self concatData:[self concatData:randomChallenge with:serverCertificateSignature] with:serverSecret];
     NSData* serverChallengeRespHash;
     if (serverMajorVersion >= 7) {
         serverChallengeRespHash = [cryptoMan SHA256HashData: serverChallengeRespHashInput];
@@ -192,7 +231,12 @@
         return;
     }
     
-    NSData* clientPairingSecret = [self concatData:clientSecret with:[cryptoMan signData:clientSecret withKey:[CryptoManager readKeyFromFile]]];
+    NSData *clientSignature = [cryptoMan signData:clientSecret withKey:[CryptoManager readKeyFromFile]];
+    if (!clientSignature) {
+        [self finishPairing:bgId forResponse:secretResp withFallbackError:@"Unable to sign the pairing secret."];
+        return;
+    }
+    NSData* clientPairingSecret = [self concatData:clientSecret with:clientSignature];
     HttpResponse* clientSecretResp = [[HttpResponse alloc] init];
     [_httpManager executeRequestSynchronously:[HttpRequest requestForResponse:clientSecretResp withUrlRequest:[_httpManager newClientSecretRespRequest:[Utils bytesToHex:clientPairingSecret]]]];
     if (![self verifyResponseStatus:clientSecretResp]) {

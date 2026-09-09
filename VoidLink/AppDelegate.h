@@ -7,6 +7,9 @@
 //
 
 #import <UIKit/UIKit.h>
+#import <CoreData/CoreData.h>
+
+FOUNDATION_EXPORT NSNotificationName const SunlightPersistentStoreReadyNotification;
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 
@@ -18,6 +21,9 @@
 @property (readonly, strong, nonatomic) NSManagedObjectModel *managedObjectModel;
 @property (readonly, strong, nonatomic) NSPersistentStoreCoordinator *persistentStoreCoordinator;
 
+// Instantiates the normal UI only after its persistent store is available.
+// A failed open displays Retry without resetting saved data.
+- (void)installRootViewControllerInWindow:(UIWindow *)window;
 - (void)saveContext;
 - (NSURL *)applicationDocumentsDirectory;
 - (NSURL*) getStoreURL;

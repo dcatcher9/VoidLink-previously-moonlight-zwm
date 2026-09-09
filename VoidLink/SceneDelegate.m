@@ -1,92 +1,153 @@
 #import "SceneDelegate.h"
-#import "StreamFrameViewController.h"
+#import "DataManager.h"
+#import "ExternalDisplayCoordinator.h"
+#import "ExternalDisplayViewController.h"
 
 API_AVAILABLE(ios(13.0))
 @implementation SceneDelegate
 
-static UIView *_sharedStreamVideoRenderView = nil;
-static UIWindow *_externalSceneWindow = nil;
++ (BOOL)isExternalDisplaySessionRole:(UISceneSessionRole)role {
+    if (@available(iOS 16.0, *)) {
+        if ([role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) {
+            return YES;
+        }
+    } else {
+        return [role isEqualToString:UIWindowSceneSessionRoleExternalDisplay];
+    }
+    // The legacy manifest role remains supported on iOS 13–15.
+    return [role isEqualToString:@"UIWindowSceneSessionRoleExternalDisplay"];
+}
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
-    if (![scene isKindOfClass:[UIWindowScene class]]) {
+    if (![scene isKindOfClass:UIWindowScene.class]) {
         return;
     }
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     if ([session.role isEqualToString:UIWindowSceneSessionRoleApplication]) {
         self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
-        NSString *storyboardName;
-        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-            storyboardName = @"iPad";
-        } else {
-            storyboardName = @"iPhone";
-        }
-        UIStoryboard *storyboard = [UIStoryboard storyboardWithName:storyboardName bundle:nil];
-        UIViewController *initialViewController = [storyboard instantiateInitialViewController];
-        self.window.rootViewController = initialViewController;
-        [self.window makeKeyAndVisible];
+        [(AppDelegate *)UIApplication.sharedApplication.delegate installRootViewControllerInWindow:self.window];
         Log(LOG_I, @"SceneDelegate: Main app scene connected.");
+    } else if ([SceneDelegate isExternalDisplaySessionRole:session.role]) {
+        self.window = [[UIWindow alloc] initWithWindowScene:windowScene];
+        self.window.rootViewController = [[ExternalDisplayViewController alloc] init];
+        [self refreshExternalDisplayPreference];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(externalDisplaySettingsClosed:)
+                                                     name:@"SettingsViewClosedNotification"
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(externalDisplaySettingsClosed:)
+                                                     name:SunlightExternalDisplayPreferenceChangedNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(externalDisplaySettingsClosed:)
+                                                     name:SunlightPersistentStoreReadyNotification
+                                                   object:nil];
+        [[ExternalDisplayCoordinator sharedCoordinator] registerWindow:self.window];
+        [self logExternalDisplay:windowScene event:@"connected"];
+    }
+}
 
-    } else if ([session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplay]) {
-        Log(LOG_I, @"SceneDelegate: External display scene connecting for screen: %@", ((UIWindowScene *)scene).screen.description);
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        _externalSceneWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
-        UIViewController *externalVC = [[UIViewController alloc] init];
-        externalVC.view.backgroundColor = [UIColor blackColor]; // Set a default background
-        _externalSceneWindow.rootViewController = externalVC;
+- (void)refreshExternalDisplayPreference {
+    AppDelegate *app = (AppDelegate *)UIApplication.sharedApplication.delegate;
+    if (!app.managedObjectContext) {
+        [ExternalDisplayCoordinator sharedCoordinator].enabled = NO;
+        return;
+    }
+    NSNumber *mode = [[[DataManager alloc] init] getSettings].externalDisplayMode;
+    // Mode 1 is the existing fullscreen wired/AirPlay path. Preserve Stage Manager and Disabled.
+    [ExternalDisplayCoordinator sharedCoordinator].enabled = mode == nil || mode.integerValue == 1;
+}
 
-        if (_sharedStreamVideoRenderView) {
-            _sharedStreamVideoRenderView.frame = _externalSceneWindow.bounds;
-            [_externalSceneWindow.rootViewController.view addSubview:_sharedStreamVideoRenderView];
-            Log(LOG_I, @"SceneDelegate: External display scene connected.");
+- (void)externalDisplaySettingsClosed:(NSNotification *)notification {
+    [self refreshExternalDisplayPreference];
+}
+
+- (void)logExternalDisplay:(UIWindowScene *)scene event:(NSString *)event {
+    UIScreen *screen = scene.screen;
+    NSMutableArray<NSString *> *modes = [NSMutableArray array];
+    for (UIScreenMode *mode in screen.availableModes) {
+        [modes addObject:NSStringFromCGSize(mode.size)];
+    }
+    Log(LOG_I, @"Sunlight external display %@: role=%@, points=%@, nativePixels=%@, currentMode=%@, scale=%.2f, nativeScale=%.2f, maxFPS=%ld, availableModes=%@",
+        event, scene.session.role, NSStringFromCGRect(screen.bounds), NSStringFromCGRect(screen.nativeBounds),
+        NSStringFromCGSize(screen.currentMode.size), screen.scale, screen.nativeScale,
+        (long)screen.maximumFramesPerSecond, [modes componentsJoinedByString:@", "]);
+}
+
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    [self logSceneLifecycle:scene event:@"active"];
+    if ([SceneDelegate isExternalDisplaySessionRole:scene.session.role]) {
+        if (self.window) {
+            [self refreshExternalDisplayPreference];
+            [[ExternalDisplayCoordinator sharedCoordinator] windowDidUpdate:self.window];
         }
+        [self logExternalDisplay:(UIWindowScene *)scene event:@"active"];
     }
 }
 
-
-// Method for StreamFrameViewController to provide its render view
-+ (void)setExternalDisplayRenderView:(UIView *)renderView {
-    _sharedStreamVideoRenderView = renderView;
-    if (_externalSceneWindow && _externalSceneWindow.rootViewController && _sharedStreamVideoRenderView) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // Ensure it's removed from any previous parent (should have been done by StreamFrameVC)
-            [_sharedStreamVideoRenderView removeFromSuperview];
-            _sharedStreamVideoRenderView.frame = _externalSceneWindow.bounds; // Set frame for external window
-            [_externalSceneWindow.rootViewController.view addSubview:_sharedStreamVideoRenderView];
-            _externalSceneWindow.hidden = NO;
-            Log(LOG_I, @"SceneDelegate: Added render view to external window's root view.");
-        });
-    } else {
-        Log(LOG_E, @"SceneDelegate: External display window or root view controller not available.");
-    }
+- (void)logSceneLifecycle:(UIScene *)scene event:(NSString *)event {
+    // A connected external screen does not prove that our scene remains visible
+    // when the phone switches apps. Record both states for hardware diagnosis.
+    Log(LOG_I, @"Sunlight scene %@: role=%@, sceneState=%ld, appState=%ld",
+        event, scene.session.role, (long)scene.activationState,
+        (long)UIApplication.sharedApplication.applicationState);
 }
 
-+ (void)clearExternalDisplayRenderView {
-    if (_sharedStreamVideoRenderView) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [_sharedStreamVideoRenderView removeFromSuperview];
-            Log(LOG_I, @"SceneDelegate: Removed render view from external display.");
-        });
+- (void)sceneWillResignActive:(UIScene *)scene {
+    [self logSceneLifecycle:scene event:@"resigning active"];
+}
+
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    [self logSceneLifecycle:scene event:@"background"];
+}
+
+- (void)sceneWillEnterForeground:(UIScene *)scene {
+    [self logSceneLifecycle:scene event:@"foreground"];
+}
+
+- (void)windowScene:(UIWindowScene *)windowScene didUpdateCoordinateSpace:(id<UICoordinateSpace>)previousCoordinateSpace interfaceOrientation:(UIInterfaceOrientation)previousInterfaceOrientation traitCollection:(UITraitCollection *)previousTraitCollection {
+    if ([SceneDelegate isExternalDisplaySessionRole:windowScene.session.role]) {
+        if (self.window) [[ExternalDisplayCoordinator sharedCoordinator] windowDidUpdate:self.window];
+        [self logExternalDisplay:windowScene event:@"updated"];
     }
-    _sharedStreamVideoRenderView = nil;
 }
 
 - (void)sceneDidDisconnect:(UIScene *)scene {
-    Log(LOG_I, @"SceneDelegate: Scene disconnected: %@, role: %@", scene.title, scene.session.role);
-
-    if ([scene.session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplay]) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (_externalSceneWindow == windowScene.windows.firstObject) { // Compare with the window from the disconnecting scene
-                [SceneDelegate clearExternalDisplayRenderView]; // Clears the shared view
-                _externalSceneWindow = nil;
-                Log(LOG_I, @"SceneDelegate: External display scene fully disconnected and cleaned up.");
-            } else {
-                Log(LOG_W, @"SceneDelegate: Disconnecting scene is not the one holding our _externalSceneWindow.");
-            }
-        } else {
-            Log(LOG_W, @"SceneDelegate: Disconnecting scene is not a UIWindowScene.");
-        }
+    if ([SceneDelegate isExternalDisplaySessionRole:scene.session.role]) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self];
+        [[ExternalDisplayCoordinator sharedCoordinator] unregisterWindow:self.window];
+        self.window = nil;
+        Log(LOG_I, @"Sunlight external display disconnected.");
     }
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
++ (void)setExternalDisplayRenderView:(UIView *)renderView {
+    [[ExternalDisplayCoordinator sharedCoordinator] setRenderView:renderView];
+}
+
++ (void)clearExternalDisplayRenderView {
+    [[ExternalDisplayCoordinator sharedCoordinator] clearRenderView];
+}
+
++ (void)clearExternalDisplayRenderView:(UIView *)renderView {
+    [[ExternalDisplayCoordinator sharedCoordinator] clearRenderView:renderView];
+}
+
++ (BOOL)isExternalDisplayAvailable {
+    return [ExternalDisplayCoordinator sharedCoordinator].isAvailable;
+}
+
++ (BOOL)isExternalDisplayRenderView:(UIView *)renderView {
+    return [[ExternalDisplayCoordinator sharedCoordinator] isPresentingView:renderView];
+}
+
++ (UIScreen *)externalDisplayScreen {
+    return [ExternalDisplayCoordinator sharedCoordinator].externalScreen;
 }
 
 @end

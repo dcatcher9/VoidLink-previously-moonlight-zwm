@@ -25,7 +25,7 @@ public struct AboutView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 28))
 
             // App 名称
-            Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "App Name")
+            Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Sunlight 3D")
                 .font(.title)
                 .bold()
 
@@ -34,22 +34,6 @@ public struct AboutView: View {
                 Text("Version \(version)")
                     .font(.subheadline)
                     .foregroundColor(.gray)
-            }
-            
-            if Locale.preferredLanguages.first!.hasPrefix("zh-Hans") {
-                if #available(iOS 14.0, *) {
-                    Text("闽ICP备17012590号-3A   主办单位：福州创图信息技术有限公司").font(.caption2)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(nil)
-                        .frame(maxWidth: 570) // ✅ 避免 Text 被拉得太宽无法换行
-                        //.padding()
-                } else {
-                    Text("闽ICP备17012590号-3A   主办单位：福州创图信息技术有限公司").font(.caption)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(nil)
-                        .frame(maxWidth: 570) // ✅ 避免 Text 被拉得太宽无法换行
-                        //.padding()
-                }
             }
             
             // 说明文字
@@ -61,7 +45,7 @@ public struct AboutView: View {
                 .padding()
 
             
-            Text(LocalizationHelper.localizedString(forKey: "VoidLink delivers better performance now!"))
+            Text(LocalizationHelper.localizedString(forKey: "aboutStreamingDescription"))
                 .multilineTextAlignment(.center)
                 .font(Font.callout.bold())
                 .lineLimit(nil)
@@ -170,4 +154,3 @@ public struct AboutView: View {
         .padding()
     }
 }
-

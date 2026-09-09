@@ -13,6 +13,8 @@
 #import "Plot.h"
 #import "Utils.h"
 #import "DataManager.h"
+#import "ConnectionLifecycle.h"
+#import "SunlightPlatform.h"
 
 #import <VideoToolbox/VideoToolbox.h>
 
@@ -21,6 +23,7 @@
 
 #include "Limelight.h"
 #include "opus_multistream.h"
+#include <stdatomic.h>
 #include "VoidLink-Swift.h"
 
 @implementation Connection {
@@ -33,9 +36,15 @@
     char _appVersionString[32];
     char _gfeVersionString[32];
     char _rtspSessionUrl[128];
+    ConnectionLifecycle *_lifecycle;
+    VideoDecoderRenderer *_sessionRenderer;
+    id<ConnectionCallbacks> _sessionCallbacks;
+    BOOL _sessionFullColorRange;
+    BOOL _session10BitCodec;
+    BOOL _sessionAuthoredHaptics;
+    float _sessionVolume;
 }
 
-static NSLock* initLock;
 static OpusMSDecoder* opusDecoder;
 static id<ConnectionCallbacks> _callbacks;
 static int lastFrameNumber;
@@ -50,6 +59,9 @@ static OPUS_MULTISTREAM_CONFIGURATION audioConfig;
 static void* audioBuffer;
 static float volume = 1.0;
 static int audioFrameSize;
+// Only the lifecycle owner resets this before entering C. Stop is observable
+// even if SDL's output device has stalled and its queue can no longer drain.
+static atomic_bool audioRendererStopping = true;
 
 static bool useSystemAudioEngine;
 static bool audioSessionInterrupted;
@@ -73,8 +85,10 @@ int DrDecoderSetup(int videoFormat, int width, int height, int redrawRate, void*
     lastFrameNumber = 0;
     activeVideoFormat = videoFormat;
     Log(LOG_I, @"Active video format: 0x%x", activeVideoFormat);
-    memset(&currentVideoStats, 0, sizeof(currentVideoStats));
-    memset(&lastVideoStats, 0, sizeof(lastVideoStats));
+    [videoStatsLock lock];
+    currentVideoStats = (video_stats_t){0};
+    lastVideoStats = (video_stats_t){0};
+    [videoStatsLock unlock];
     lastRenderedInterpolatedFrameCount = [renderer renderedInterpolatedFrameCount];
     bwTracker = [[BandwidthTracker alloc] initWithWindowSeconds:10 bucketIntervalMs:250];
     return 0;
@@ -82,11 +96,12 @@ int DrDecoderSetup(int videoFormat, int width, int height, int redrawRate, void*
 
 void DrCleanup(void)
 {
-    [renderer cleanup];
-    // Drop the static reference so the old renderer (and its decoder resources)
-    // doesn't outlive the session; otherwise it stays alive until the next
-    // Connection init overwrites it, which can interleave with a new session.
-    renderer = nil;
+    [ConnectionLifecycle cleanupActiveDecoder];
+}
+
+void DrStop(void)
+{
+    [renderer stop];
 }
 
 -(BandwidthTracker *) getBwTracker
@@ -96,19 +111,20 @@ void DrCleanup(void)
 
 -(BOOL) getVideoStats:(video_stats_t*)stats
 {
-    // We return lastVideoStats because it is a complete 1 second window
-    [videoStatsLock lock];
-    if (lastVideoStats.endTime != 0) {
-        memcpy(stats, &lastVideoStats, sizeof(*stats));
+    if (stats == NULL) return NO;
+    __block BOOL available = NO;
+    [_lifecycle performIfCurrentOwner:^{
+        // Keep both the completed window and its renderer in the same session.
+        // Typed assignment retains/releases the struct's ARC-owned NSString.
+        [videoStatsLock lock];
+        if (lastVideoStats.endTime != 0) {
+            *stats = lastVideoStats;
+            available = YES;
+        }
         [videoStatsLock unlock];
-
-        // Pull in the separately-collected renderer stats
-        [renderer getAllStats:stats];
-
-        return YES;
-    }
-    [videoStatsLock unlock];
-    return NO;
+        if (available) [self->_sessionRenderer getAllStats:stats];
+    }];
+    return available;
 }
 
 -(NSString*) getActiveCodecName
@@ -189,7 +205,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit)
             lastVideoStats = currentVideoStats;
             [videoStatsLock unlock];
             
-            memset(&currentVideoStats, 0, sizeof(currentVideoStats));
+            currentVideoStats = (video_stats_t){0};
             currentVideoStats.startTime = now;
         }
         
@@ -250,6 +266,26 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit)
                              bufferType:BUFFER_TYPE_PICDATA
                              decodeUnit:decodeUnit
                         decodeStartTime:decodeStartTime];
+}
+
+static void PrepareAudioPlayback(void) {
+    atomic_store_explicit(&audioRendererStopping, false, memory_order_release);
+}
+
+static void ArStop(void) {
+    atomic_store_explicit(&audioRendererStopping, true, memory_order_release);
+}
+
+static BOOL WaitForSdlAudioQueueCapacity(void) {
+    // Device/buffer storage remains owned until common joins the audio callback.
+    if (audioDevice == 0 || audioFrameSize <= 0) return NO;
+    while (!atomic_load_explicit(&audioRendererStopping, memory_order_acquire)) {
+        if (SDL_GetQueuedAudioSize(audioDevice) / audioFrameSize <= 10) {
+            return !atomic_load_explicit(&audioRendererStopping, memory_order_acquire);
+        }
+        [NSThread sleepForTimeInterval:0.001f];
+    }
+    return NO;
 }
 
 int ArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* context, int flags)
@@ -325,6 +361,7 @@ int ArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, v
 
 void ArCleanup(void)
 {
+    ArStop();
     if (opusDecoder != NULL) {
         opus_multistream_decoder_destroy(opusDecoder);
         opusDecoder = NULL;
@@ -420,38 +457,46 @@ void AudioEngineInit(int sampleRate, int channelCount) {
 }
 
 + (void)resetSysAudioPlayback {
-    audioSessionInterrupted = true;
+    Connection *connection = [ConnectionLifecycle activeContext];
+    if (!connection) return;
+    [connection->_lifecycle performIfCurrentOwner:^{
+        audioSessionInterrupted = true;
+    }];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0),
                    dispatch_get_main_queue(), ^{
-        @try {
-            if (audioPlayerNode) {
-                [audioPlayerNode stop];
-            }
-
-            if (audioEngine) {
-                [audioEngine stop];
-                [audioEngine reset];
-
+        [connection->_lifecycle performIfCurrentOwner:^{
+            @try {
                 if (audioPlayerNode) {
-                    [audioEngine disconnectNodeInput:audioPlayerNode];
-                    [audioEngine disconnectNodeOutput:audioPlayerNode];
-                    [audioEngine detachNode:audioPlayerNode];
+                    [audioPlayerNode stop];
                 }
+
+                if (audioEngine) {
+                    [audioEngine stop];
+                    [audioEngine reset];
+
+                    if (audioPlayerNode) {
+                        [audioEngine disconnectNodeInput:audioPlayerNode];
+                        [audioEngine disconnectNodeOutput:audioPlayerNode];
+                        [audioEngine detachNode:audioPlayerNode];
+                    }
+                }
+
+                audioEngine = nil;
+                audioPlayerNode = nil;
+
+                AudioEngineInit(audioConfig.sampleRate, audioConfig.channelCount);
             }
-
-            audioEngine = nil;
-            audioPlayerNode = nil;
-
-            AudioEngineInit(audioConfig.sampleRate, audioConfig.channelCount);
-        }
-        @catch (NSException *exception) {
-            NSLog(@"resetSysAudioPlayback failed: %@, reason: %@",
-                  exception.name,
-                  exception.reason);
-        }
+            @catch (NSException *exception) {
+                NSLog(@"resetSysAudioPlayback failed: %@, reason: %@",
+                      exception.name,
+                      exception.reason);
+            }
+        }];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            audioSessionInterrupted = false;
+            [connection->_lifecycle performIfCurrentOwner:^{
+                audioSessionInterrupted = false;
+            }];
         });
     });
 }
@@ -459,6 +504,7 @@ void AudioEngineInit(int sampleRate, int channelCount) {
 
 void ArDecodeAndPlaySample(char* sampleData, int sampleLength)
 {
+    if (atomic_load_explicit(&audioRendererStopping, memory_order_acquire)) return;
     if(appDidEnterBackgroundWithoutPip && muteInBackground) return;
     
     int decodeLen;
@@ -507,9 +553,7 @@ void ArDecodeAndPlaySample(char* sampleData, int sampleLength)
                 }
             }
             
-            while (SDL_GetQueuedAudioSize(audioDevice) / audioFrameSize > 10) {
-                [NSThread sleepForTimeInterval:0.001f];
-            }
+            if (!WaitForSdlAudioQueueCapacity()) return;
             
             if (SDL_QueueAudio(audioDevice,
                                audioBuffer,
@@ -523,27 +567,42 @@ void ArDecodeAndPlaySample(char* sampleData, int sampleLength)
 
 void ClStageStarting(int stage)
 {
+    // C resets its interrupt flag before this first callback. Cancellation that
+    // arrived between the final caller check and that reset must be reasserted.
+    if ([ConnectionLifecycle reassertActiveCancellation]) return;
     [_callbacks stageStarting:LiGetStageName(stage)];
 }
 
 void ClStageComplete(int stage)
 {
+    if ([ConnectionLifecycle reassertActiveCancellation]) return;
     [_callbacks stageComplete:LiGetStageName(stage)];
 }
 
 void ClStageFailed(int stage, int errorCode)
 {
+    if ([ConnectionLifecycle reassertActiveCancellation]) return;
     [_callbacks stageFailed:LiGetStageName(stage) withError:errorCode portTestFlags:LiGetPortFlagsFromStage(stage)];
 }
 
 void ClConnectionStarted(void)
 {
+    if ([ConnectionLifecycle reassertActiveCancellation]) return;
     [_callbacks connectionStarted];
 }
 
-void ClConnectionTerminated(int errorCode)
+void ClConnectionTerminatedWithSession(int errorCode, uint64_t sessionToken)
 {
-    [_callbacks connectionTerminated: errorCode];
+    __block Connection *connection;
+    __block id<ConnectionCallbacks> callbacks;
+    if (![ConnectionLifecycle claimTerminationForSessionToken:sessionToken capture:^(id context) {
+        connection = context;
+        callbacks = connection->_sessionCallbacks;
+    }]) return;
+    // Both references belong to the captured instance. A delayed detached C
+    // callback must never read a successor's process-wide callback globals.
+    [callbacks connectionTerminated:errorCode];
+    [connection terminate];
 }
 
 void ClLogMessage(const char* format, ...)
@@ -639,24 +698,17 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
 
 -(void) terminate
 {
-    // Interrupt any action blocking LiStartConnection(). This is
-    // thread-safe and done outside initLock on purpose, since we
-    // won't be able to acquire it if LiStartConnection is in
-    // progress.
-    LiInterruptConnection();
-    [audioPlayerNode stop];
-    [audioEngine stop];
-    [ControllerUtil stopAllDualSenseHaptics];
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self cancel];
+}
 
-    // We dispatch this async to get out because this can be invoked
-    // on a thread inside common and we don't want to deadlock. It also avoids
-    // blocking on the caller's thread waiting to acquire initLock.
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        [initLock lock];
-        LiStopConnection();
-        [initLock unlock];
-    });
+- (void)terminateWithCompletion:(dispatch_block_t)completion {
+    [super cancel];
+    [_lifecycle cancelWithCompletion:completion];
+}
+
+- (void)cancel {
+    [super cancel];
+    [_lifecycle cancel];
 }
 
 - (void)handleAudioSessionInterruption:(NSNotification *)notification {
@@ -664,35 +716,47 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     AVAudioSessionInterruptionType type =
         [info[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
     
-    switch (type) {
-        case AVAudioSessionInterruptionTypeBegan:
-            audioSessionInterrupted = true;
-            [audioPlayerNode stop];
-            [audioEngine stop];
-            break;
-        case AVAudioSessionInterruptionTypeEnded:
-            AudioEngineInit(audioConfig.sampleRate, audioConfig.channelCount);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5*NSEC_PER_SEC), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                audioSessionInterrupted = false;
-            });
-        default:
-            break;
-    }
+    [_lifecycle performIfCurrentOwner:^{
+        switch (type) {
+            case AVAudioSessionInterruptionTypeBegan: {
+                audioSessionInterrupted = true;
+                [audioPlayerNode stop];
+                [audioEngine stop];
+                break;
+            }
+            case AVAudioSessionInterruptionTypeEnded: {
+                AudioEngineInit(audioConfig.sampleRate, audioConfig.channelCount);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5*NSEC_PER_SEC), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    [self->_lifecycle performIfCurrentOwner:^{
+                        audioSessionInterrupted = false;
+                    }];
+                });
+                break;
+            }
+            default:
+                break;
+        }
+    }];
 }
 
 -(id) initWithConfig:(StreamConfiguration*)config renderer:(VideoDecoderRenderer*)myRenderer connectionCallbacks:(id<ConnectionCallbacks>)callbacks
 {
     self = [super init];
 
-    // Use a lock to ensure that only one thread is initializing
-    // or deinitializing a connection at a time.
-    if (initLock == nil) {
-        initLock = [[NSLock alloc] init];
-    }
-    
-    if (videoStatsLock == nil) {
+    static dispatch_once_t statsOnce;
+    dispatch_once(&statsOnce, ^{
         videoStatsLock = [[NSLock alloc] init];
-    }
+    });
+    _sessionRenderer = myRenderer;
+    _sessionCallbacks = callbacks;
+    _lifecycle = [[ConnectionLifecycle alloc] initWithCleanup:^{
+        [myRenderer cleanup];
+    } interrupt:^{
+        // Wake a blocked audio callback before C stop attempts to join it.
+        // The lifecycle invokes this only while this Connection owns C state.
+        ArStop();
+        LiInterruptConnection();
+    }];
     
     NSString *rawAddress = [Utils addressPortStringToAddress:config.host];
     strncpy(_hostString,
@@ -723,14 +787,10 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     }
     _serverInfo.serverCodecModeSupport = config.serverCodecModeSupport;
 
-    renderer = myRenderer;
-    _callbacks = callbacks;
-
     LiInitializeStreamConfiguration(&_streamConfig);
     _streamConfig.colorRange = config.fullColorRange ? 1 : 0;
-    fullColorRange = config.fullColorRange;
-    // request10BitCodec = config.enableHdr || config.sdrPerformanceWorkaround;
-    request10BitCodec = config.enableHdr;
+    _sessionFullColorRange = config.fullColorRange;
+    _session10BitCodec = config.enableHdr;
     _streamConfig.width = config.width;
     _streamConfig.height = config.height;
     _streamConfig.fps = config.frameRate;
@@ -738,7 +798,7 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     _streamConfig.supportedVideoFormats = config.supportedVideoFormats;
     _streamConfig.audioConfiguration = config.audioConfiguration;
     _streamConfig.redirectMic = config.redirectMic && [MicHandler permissionGranted];
-    [Connection setVolume:config.localVolume];
+    _sessionVolume = config.localVolume;
     
     // Since we require iOS 12 or above, we're guaranteed to be running
     // on a 64-bit device with ARMv8 crypto instructions, so we don't
@@ -764,9 +824,13 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     LiInitializeVideoCallbacks(&_drCallbacks);
     _drCallbacks.setup = DrDecoderSetup;
     _drCallbacks.cleanup = DrCleanup;
+    _drCallbacks.stop = DrStop;
     // Use pull renderer for legacy and off frame pacing, direct submit for queue-based frame pacing
-    DataManager* dataMan = [[DataManager alloc] init];
-    FramePacingMode framePacingMode = [[dataMan getSettings].framePacingMode integerValue];
+    TemporarySettings *presentation = config.presentationSettings ?: [[[DataManager alloc] init] getSettings];
+    // Stereo is consumed by Metal, which waits for decoded frames in FrameQueue.
+    // Legacy pull mode requires an AVSB display link to poll incoming frames.
+    FramePacingMode framePacingMode = config.requiresMetalPresentation ? FramePacingModeQueue :
+        presentation.framePacingMode.integerValue;
     if (framePacingMode == FramePacingModeLegacy || framePacingMode == FramePacingModeOff) {
         _drCallbacks.capabilities = CAPABILITY_PULL_RENDERER |
                                     CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
@@ -782,6 +846,7 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     LiInitializeAudioCallbacks(&_arCallbacks);
     _arCallbacks.init = ArInit;
     _arCallbacks.cleanup = ArCleanup;
+    _arCallbacks.stop = ArStop;
     _arCallbacks.decodeAndPlaySample = ArDecodeAndPlaySample;
     _arCallbacks.capabilities = CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
 
@@ -790,7 +855,8 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     _clCallbacks.stageComplete = ClStageComplete;
     _clCallbacks.stageFailed = ClStageFailed;
     _clCallbacks.connectionStarted = ClConnectionStarted;
-    _clCallbacks.connectionTerminated = ClConnectionTerminated;
+    _clCallbacks.connectionTerminatedWithSession = ClConnectionTerminatedWithSession;
+    _clCallbacks.connectionSessionId = _lifecycle.sessionToken;
 #ifdef DEBUG
     _clCallbacks.logMessage = ClLogMessage;
 #endif
@@ -801,32 +867,59 @@ void ClDs5HapticsIrV2(const LI_DS5_HAPTICS_IR_FRAME_V2* frame)
     _clCallbacks.setMotionEventState = ClSetMotionEventState;
     _clCallbacks.setControllerLED = ClSetControllerLED;
     _clCallbacks.setAdaptiveTriggers = ClSetAdaptiveTriggers;
-    useDualSenseAuthoredPCM = (config.emulatedControllerType == ControllerEmulationPsEnhancedHaptic
-                               && ControllerUtil.hasDualSenseController) || config.hapticEngine == RumbleDevice;
-    if (useDualSenseAuthoredPCM) {
+    // The shared core negotiates compatible authored-haptics capabilities with
+    // each host, including Sunshine 3D's nonconflicting SBS capability profile.
+    _sessionAuthoredHaptics =
+        ((config.emulatedControllerType == ControllerEmulationPsEnhancedHaptic
+          && ControllerUtil.hasDualSenseController) || config.hapticEngine == RumbleDevice);
+    if (_sessionAuthoredHaptics) {
         _clCallbacks.ds5HapticsPcm = ClDs5HapticsPcm;
         // _clCallbacks.ds5HapticsIrV2 = ClDs5HapticsIrV2;
     }
 
-    [[NSNotificationCenter defaultCenter] addObserver:self
-           selector:@selector(handleAudioSessionInterruption:)
-               name:AVAudioSessionInterruptionNotification
-             object:nil];
-    
     return self;
 }
 
 -(void) main
 {
-    [initLock lock];
-    LiStartConnection(&_serverInfo,
-                      &_streamConfig,
-                      &_clCallbacks,
-                      &_drCallbacks,
-                      &_arCallbacks,
-                      NULL, 0,
-                      NULL, 0);
-    [initLock unlock];
+    [_lifecycle runWithContext:self prepare:^{
+        // Publish process-wide callback state only after the previous C session
+        // has completely stopped. Merely constructing a successor changes none.
+        PrepareAudioPlayback();
+        [self->_sessionRenderer activateForStreaming];
+        renderer = self->_sessionRenderer;
+        _callbacks = self->_sessionCallbacks;
+        fullColorRange = self->_sessionFullColorRange;
+        request10BitCodec = self->_session10BitCodec;
+        useDualSenseAuthoredPCM = self->_sessionAuthoredHaptics;
+        [Connection setVolume:self->_sessionVolume];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+               selector:@selector(handleAudioSessionInterruption:)
+                   name:AVAudioSessionInterruptionNotification object:nil];
+    } start:^int{
+        return LiStartConnection(&self->_serverInfo,
+                                 &self->_streamConfig,
+                                 &self->_clCallbacks,
+                                 &self->_drCallbacks,
+                                 &self->_arCallbacks,
+                                 NULL, 0,
+                                 NULL, 0);
+    } stop:^{
+        LiStopConnection();
+        [audioPlayerNode stop];
+        [audioEngine stop];
+        [ControllerUtil stopAllDualSenseHaptics];
+    } teardown:^{
+        [[NSNotificationCenter defaultCenter] removeObserver:self];
+        renderer = nil;
+        _callbacks = nil;
+        self->_sessionRenderer = nil;
+        self->_sessionCallbacks = nil;
+    }];
+}
+
+- (void)performMicrophoneInput:(dispatch_block_t)action {
+    [_lifecycle performIfCurrentOwner:action];
 }
 
 @end

@@ -29,6 +29,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (atomic) BOOL paused;
 - (void)dequeueWithTimeout:(CFTimeInterval)timeout
                 completion:(void (^)(Frame *frame))completion;
+// Waiting ends with nil when this owner is stopped or replaced.
+- (void)dequeueWithTimeout:(CFTimeInterval)timeout
+                    owner:(id)owner
+               completion:(void (^)(Frame * _Nullable frame))completion;
 
 + (instancetype)sharedInstance;
 
@@ -38,11 +42,22 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)clear;
 - (int)enqueue:(Frame *)frame;
 - (int)enqueue:(Frame *)frame withSlackSize:(int)slack;
+// Rejects callbacks from a replaced/stopped session without changing its successor.
+// Returns one dropped frame on rejection, leaving current queue metrics untouched.
+- (int)enqueue:(Frame *)frame withSlackSize:(int)slack owner:(id)owner;
 - (nullable Frame *)dequeue;
 - (nullable Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout;
+- (nullable Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout owner:(id)owner;
+// Captures the current queue owner and never consumes a replacement's frames.
+- (nullable Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout untilCancelled:(BOOL (^)(void))isCancelled;
 - (CFTimeInterval)estimatedFramerate;
 - (int)currentSoftCap;
 - (void)waitForEnqueue;
+- (void)waitForEnqueueUntilCancelled:(BOOL (^)(void))isCancelled;
+// Metal may start before the decoder owns an active queue. Wait through pause.
+- (void)waitForActiveEnqueueUntilCancelled:(BOOL (^)(void))isCancelled;
+// Records a decoded image discarded before enqueue (e.g. interpolation backlog).
+- (void)recordDroppedFrameForOwner:(id)owner;
 - (void)startForOwner:(id)owner;
 - (void)stopForOwner:(id)owner;
 

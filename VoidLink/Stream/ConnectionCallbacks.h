@@ -27,4 +27,8 @@
                          left:(const uint8_t*)left right:(const uint8_t*)right;
 - (void) videoContentShown;
 
+@optional
+// Instance-owned presentation status; optional for non-UI connection consumers.
+- (void)updateTransientHUDText:(NSString * _Nullable)text;
+
 @end

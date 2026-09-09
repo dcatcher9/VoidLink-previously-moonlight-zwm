@@ -8,13 +8,11 @@
 
 #import "AppListResponse.h"
 #import "TemporaryApp.h"
-#import "DataManager.h"
 #import <libxml2/libxml/xmlreader.h>
 
 @implementation AppListResponse {
     NSMutableSet* _appList;
 }
-@synthesize data, statusCode, statusMessage;
 
 static const char* TAG_APP = "App";
 static const char* TAG_APP_TITLE = "AppTitle";
@@ -23,43 +21,23 @@ static const char* TAG_HDR_SUPPORTED = "IsHdrSupported";
 static const char* TAG_APP_INSTALL_PATH = "AppInstallPath";
 
 - (void)populateWithData:(NSData *)xml {
-    self.data = xml;
     _appList = [[NSMutableSet alloc] init];
-    [self parseData];
+    // Share status validation, size limits and payload-free XML diagnostics with
+    // all other host responses. A failed refresh cannot retain a stale success.
+    [super populateWithData:xml];
+    if (self.isStatusOk) [self parseAppData];
 }
 
-- (void) parseData {
-    xmlDocPtr docPtr = xmlParseMemory([self.data bytes], (int)[self.data length]);
-    if (docPtr == NULL) {
-        Log(LOG_W, @"An error occured trying to parse xml.");
+- (void)parseAppData {
+    xmlDocPtr docPtr = xmlReadMemory(self.data.bytes, (int)self.data.length, NULL, NULL,
+                                    XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+    xmlNodePtr node = docPtr ? xmlDocGetRootElement(docPtr) : NULL;
+    if (!node) {
+        self.statusCode = 502;
+        self.statusMessage = @"Malformed app list response from host.";
+        if (docPtr) xmlFreeDoc(docPtr);
         return;
     }
-    
-    xmlNodePtr node = xmlDocGetRootElement(docPtr);
-    if (node == NULL) {
-        Log(LOG_W, @"No root XML element.");
-        xmlFreeDoc(docPtr);
-        return;
-    }
-    
-    xmlChar* statusStr = xmlGetProp(node, (const xmlChar*)[TAG_STATUS_CODE UTF8String]);
-    if (statusStr != NULL) {
-        int status = (int)[[NSString stringWithUTF8String:(const char*)statusStr] longLongValue];
-        xmlFree(statusStr);
-        self.statusCode = status;
-    }
-    
-    xmlChar* statusMsgXml = xmlGetProp(node, (const xmlChar*)[TAG_STATUS_MESSAGE UTF8String]);
-    NSString* statusMsg;
-    if (statusMsgXml != NULL) {
-        statusMsg = [NSString stringWithUTF8String:(const char*)statusMsgXml];
-        xmlFree(statusMsgXml);
-    }
-    else {
-        statusMsg = @"Server Error";
-    }
-    self.statusMessage = statusMsg;
-    
     node = node->children;
     
     while (node != NULL) {

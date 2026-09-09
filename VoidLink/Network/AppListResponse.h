@@ -8,7 +8,7 @@
 
 #import "HttpResponse.h"
 
-@interface AppListResponse : NSObject <Response>
+@interface AppListResponse : HttpResponse
 
 - (void)populateWithData:(NSData *)data;
 - (NSSet*) getAppList;

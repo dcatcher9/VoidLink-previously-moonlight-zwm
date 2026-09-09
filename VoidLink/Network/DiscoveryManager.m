@@ -10,7 +10,6 @@
 #import "CryptoManager.h"
 #import "HttpManager.h"
 #import "Utils.h"
-#import "DataManager.h"
 #import "DiscoveryWorker.h"
 #import "ServerInfoResponse.h"
 #import "IdManager.h"
@@ -30,7 +29,6 @@
     NSString* _uniqueId;
     NSData* _cert;
     BOOL shouldDiscover;
-    DataManager* dataMan;
 }
 
 - (id)initWithHosts:(NSArray *)hosts andCallback:(id<DiscoveryCallback>)callback {
@@ -53,7 +51,6 @@
     [CryptoManager generateKeyPairUsingSSL];
     _uniqueId = [IdManager getUniqueId];
     _cert = [CryptoManager readCertFromFile];
-    DataManager* dataMan = [[DataManager alloc] init];
     return self;
 }
 
@@ -113,11 +110,7 @@
         return NO;
     }
     
-    BOOL ret = ![DiscoveryManager isAddressLAN:((struct sockaddr_in*)result->ai_addr)->sin_addr.s_addr];
-    //BOOL ret = NO;
     freeaddrinfo(result);
-    
-   // NSLog(@"IP Check, is prohibited: %d", ret);
 
     return NO;
 //#else

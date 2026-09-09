@@ -19,12 +19,15 @@
 #define CONN_TEST_SERVER "www.baidu.com"
 
 @interface Connection : NSOperation <NSStreamDelegate>
-@property (class, nonatomic, assign) bool muteInBackground;
-@property (class, nonatomic, assign) bool useSystemAudioEngine;
-@property (class, nonatomic, assign) bool useDualSenseHapticsIrV2;
++ (void)setMuteInBackground:(bool)mute;
++ (void)setUseSystemAudioEngine:(bool)useSystemAudioEngine;
 
 -(id) initWithConfig:(StreamConfiguration*)config renderer:(VideoDecoderRenderer*)myRenderer connectionCallbacks:(id<ConnectionCallbacks>)callbacks;
 -(void) terminate;
+// Completion runs asynchronously after this connection's engine and decoder retire.
+- (void)terminateWithCompletion:(dispatch_block_t)completion;
+// Runs a short microphone send only while this connection owns the transport.
+- (void)performMicrophoneInput:(dispatch_block_t)action;
 -(void) main;
 -(BandwidthTracker *) getBwTracker;
 -(BOOL) getVideoStats:(video_stats_t*)stats;

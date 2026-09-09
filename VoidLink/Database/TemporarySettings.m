@@ -11,6 +11,7 @@
 
 #import "TemporarySettings.h"
 #import "OnScreenControls.h"
+#import "SunlightNativeResolution.h"
 
 @implementation TemporarySettings
 
@@ -88,6 +89,13 @@
     self.framerate = settings.framerate;
     self.height = settings.height;
     self.width = settings.width;
+    if (settings.resolutionSelected.integerValue == 4) {
+        CGSize native = SunlightNativeLandscapeSize();
+        if (native.width >= 1 && native.height >= 1) {
+            self.width = @((int)native.width);
+            self.height = @((int)native.height);
+        }
+    }
     self.audioConfig = settings.audioConfig;
     self.preferredCodec = settings.preferredCodec;
     self.enableYUV444 = settings.enableYUV444;

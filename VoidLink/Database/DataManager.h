@@ -14,6 +14,8 @@
 #import "TemporaryApp.h"
 #import "TemporarySettings.h"
 
+FOUNDATION_EXPORT NSNotificationName const SunlightExternalDisplayPreferenceChangedNotification;
+
 @interface DataManager : NSObject
 
 typedef NS_ENUM(NSInteger, ControllerGyroSwitchMode) {
@@ -170,6 +172,9 @@ typedef NS_ENUM(NSInteger, PencilTickMode) {
 - (Settings*) retrieveSettings;
 - (void) saveData;
 - (TemporarySettings*) getSettings;
+// Saves only output preference (0: Stage Manager, 1: fullscreen, 2: device).
+// Successful changes notify on main with userInfo[@"externalDisplayMode"].
+- (BOOL)updateExternalDisplayMode:(NSInteger)mode error:(NSError **)error;
 
 - (void) updateUniqueId:(NSString*)uniqueId;
 - (NSString*) getUniqueId;

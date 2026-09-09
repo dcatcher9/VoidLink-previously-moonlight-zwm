@@ -16,10 +16,12 @@
 #import "DataManager.h"
 #import "TemporarySettings.h"
 #import "VideoDecoderRenderer.h"
+#import "SunlightDecoderRecovery.h"
+#import "SunlightVideoTimestamp.h"
+#import "SunlightPlatform.h"
 #import "FrameQueue.h"
 #import "StreamView.h"
 #import "Plot.h"
-#import "PlatformThreads.h"
 #import "MetalViewController.h"
 #import "ImGuiPlots.h"
 #import "VoidLink-Swift.h"
@@ -36,7 +38,7 @@
 // Define for extra logging related to frame pacing
 //#define DISPLAYLINK_VERBOSE
 
-static BOOL kEnableFrameInterpolation = false;
+static atomic_bool kEnableFrameInterpolation = false;
 static __weak VideoDecoderRenderer *sActiveRenderer = nil;
 
 // Private libavformat API for writing the AV1 Codec Configuration Box
@@ -44,18 +46,30 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
                               int write_seq_header);
 
 @interface VideoDecoderRenderer ()
+- (void)recordIncomingFrameTiming:(Frame *)frame;
 - (void)startOrRestartFrameInterpolation;
 - (void)stopFrameInterpolation;
 - (NSInteger)displayLinkFrameRateForInterpolationEnabled:(BOOL)enabled;
 - (void)restartDisplayLinkForInterpolationEnabled:(BOOL)enabled;
-// - (void)logColorMetadataForFrameIfNeeded:(Frame *)frame;
+- (OSStatus)decodeFrameWithSampleBuffer:(CMSampleBufferRef)sampleBuffer
+                          frameNumber:(int)frameNumber
+                            frameType:(int)frameType
+                      decodeStartTime:(CFTimeInterval)decodeStartTime
+                        requestRefresh:(BOOL *)requestRefresh;
+- (Frame *)frameForDecodedImage:(CVImageBufferRef)imageBuffer
+             formatDescription:(CMVideoFormatDescriptionRef)formatDescription
+                     timestamp:(CMTime)timestamp duration:(CMTime)duration
+                   frameNumber:(int)frameNumber frameType:(int)frameType
+                        status:(OSStatus *)status;
+- (FrameInterpolator *)newFrameInterpolatorWithMaximumDimension:(NSInteger)dimension
+                                             maximumPixelCount:(NSInteger)count;
 @end
 
 @implementation VideoDecoderRenderer {
     dispatch_queue_t _sq, _vtq;
     StreamView* _view;
     __weak id<ConnectionCallbacks> _callbacks;
-    float _streamAspectRatio;
+    _Atomic(float) _streamAspectRatio;
 
     AVSampleBufferDisplayLayer* _displayLayer;
     int _videoFormat;
@@ -69,10 +83,12 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     CMVideoFormatDescriptionRef _formatDesc;
     CMVideoFormatDescriptionRef _formatDescImageBuffer;
     VTDecompressionSessionRef _decompressionSession;
+    SunlightDecoderRecovery _decoderRecovery;
+    SunlightVideoTimestamp _videoTimestamp;
     FrameInterpolator *_frameInterpolator;
     BOOL _frameInterpolationPaused;
-    BOOL _loggedSourceFrameColorMetadata;
-    BOOL _loggedInterpolatedFrameColorMetadata;
+    BOOL _activatedForStreaming;
+    atomic_bool _cleanupRequested;
     atomic_uint_fast64_t _renderedInterpolatedFrameCount;
 
     CADisplayLink *_displayLink;
@@ -80,14 +96,16 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     RenderingBackend _renderingBackend;
 
     FramePacingMode _framePacingMode;
+    TemporarySettings *_presentationSettings;
     bool _enableTimebase;
     bool _asyncFrameDequeue;
 
     // Cached UIApplication background state. UIKit's applicationState must only be
     // read on the main thread, but the decode path needs it on the VTDecoder queue.
-    // Updated on the main thread via notifications; a stale read here is harmless
-    // (it only gates metrics collection).
-    volatile BOOL _appInBackground;
+    // Updated on main via notifications and read atomically by metrics workers.
+    atomic_bool _appInBackground;
+    BOOL _hasLastDecodedFramePTS;
+    CFTimeInterval _lastDecodedFramePTS;
         
     // CMTime playTime;
     // NSTimeInterval previousLinkTime;
@@ -117,38 +135,23 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     [renderer stopFrameInterpolation];
 }
 
-- (void)reinitializeDisplayLayer
+// Presentation layout must not release format descriptions or reset VT. A
+// resize moves the existing decoded picture; recovery owns decoder resets.
+- (void)updateDisplayLayerLayout
 {
+    if (_cleanupRequested) return;
     if (_displayLayer == nil) {
         _displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
         _displayLayer.backgroundColor = [UIColor blackColor].CGColor;
         _displayLayer.videoGravity = AVLayerVideoGravityResize;
+        _displayLayer.hidden = YES;
         [_view.layer addSublayer:_displayLayer];
     }
 
-    // Update aspect ratio from the actual stream dimensions if we have a format description
     float aspectRatioToUse = _streamAspectRatio;
-    if (_formatDesc != NULL) {
-        CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(_formatDesc);
-        if (dimensions.width > 0 && dimensions.height > 0) {
-            aspectRatioToUse = (float)dimensions.width / (float)dimensions.height;
-            if (fabsf(aspectRatioToUse - _streamAspectRatio) > 0.001f) {
-                Log(LOG_I, @"Stream resolution changed: updating aspect ratio from %.4f to %.4f (%dx%d)",
-                    _streamAspectRatio, aspectRatioToUse, dimensions.width, dimensions.height);
-                _streamAspectRatio = aspectRatioToUse;
-                // Also update StreamView's aspect ratio for correct touch input mapping (if it's a StreamView)
-                if ([_view respondsToSelector:@selector(setStreamAspectRatio:)]) {
-                    [(StreamView*)_view setStreamAspectRatio:aspectRatioToUse];
-                }
-            }
-        }
-    }
-
-    // Ensure the AVSampleBufferDisplayLayer is sized to preserve the aspect ratio
-    // of the video stream. We used to use AVLayerVideoGravityResizeAspect, but that
-    // respects the PAR encoded in the SPS which causes our computed video-relative
-    // touch location to be wrong in StreamView if the aspect ratio of the host
-    // desktop doesn't match the aspect ratio of the stream.
+    if (!isfinite(aspectRatioToUse) || aspectRatioToUse <= 0) return;
+    // Size explicitly rather than using encoded pixel aspect ratio, so the
+    // picture and StreamView's absolute input mapping use the same geometry.
     CGSize videoSize;
     if (_view.bounds.size.width > _view.bounds.size.height * aspectRatioToUse) {
         videoSize = CGSizeMake(_view.bounds.size.height * aspectRatioToUse, _view.bounds.size.height);
@@ -161,38 +164,18 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     _displayLayer.position = CGPointMake(CGRectGetMidX(_view.bounds), CGRectGetMidY(_view.bounds));
     _displayLayer.bounds = CGRectMake(0, 0, videoSize.width, videoSize.height);
     [CATransaction commit];
-
-    // Hide the layer until we get an IDR frame. This ensures we
-    // can see the loading progress label as the stream is starting.
-    _displayLayer.hidden = YES;
-
-    if (_formatDesc != nil) {
-        CFRelease(_formatDesc);
-        _formatDesc = nil;
-    }
-
-    if (_formatDescImageBuffer != nil) {
-        CFRelease(_formatDescImageBuffer);
-        _formatDescImageBuffer = nil;
-    }
-
-    @synchronized(self) {
-        if (_decompressionSession != nil){
-            VTDecompressionSessionWaitForAsynchronousFrames(_decompressionSession);
-
-            VTDecompressionSessionInvalidate(_decompressionSession);
-            CFRelease(_decompressionSession);
-            _decompressionSession = nil;
-        }
-    }
 }
 
 - (id)initWithView:(UIView* )view callbacks:(id<ConnectionCallbacks>)callbacks streamAspectRatio:(float)aspectRatio
 {
+    return [self initWithView:view callbacks:callbacks streamAspectRatio:aspectRatio presentationSettings:nil];
+}
+
+- (id)initWithView:(UIView*)view callbacks:(id<ConnectionCallbacks>)callbacks
+ streamAspectRatio:(float)aspectRatio presentationSettings:(TemporarySettings *)settings
+{
     NSLog(@"initializing video decoder %f", CACurrentMediaTime());
     self = [super init];
-    
-    appDidEnterBackgroundWithoutPip = false;
     
     _sq = dispatch_queue_create("com.moonlight.VideoDecoderRenderer",
                                 dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
@@ -207,9 +190,11 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     _maxRefreshRate = [[UIScreen mainScreen] maximumFramesPerSecond];
     _parameterSetBuffers = [[NSMutableArray alloc] init];
     atomic_init(&_renderedInterpolatedFrameCount, 0);
+    atomic_init(&_cleanupRequested, false);
+    _decoderRecovery = SunlightDecoderRecoveryInitial();
 
-    DataManager* dataMan = [[DataManager alloc] init];
-    TemporarySettings* tempSettings = [dataMan getSettings];
+    _presentationSettings = settings;
+    TemporarySettings* tempSettings = _presentationSettings ?: [[[DataManager alloc] init] getSettings];
 
     _framePacingMode = tempSettings.framePacingMode.integerValue;
     _asyncFrameDequeue = tempSettings.asyncFrameDequeue;
@@ -219,20 +204,14 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     _needRequeuing = _queueSize>0;
 
     _frameQueue = [FrameQueue sharedInstance];
-    [_frameQueue startForOwner:self];
-    [_frameQueue setHighWaterMark:MAX(1, _queueSize)];
 
-    [self reinitializeDisplayLayer];
+    [self updateDisplayLayerLayout];
     // NSTimeInterval interval = 1.0/tempSettings.framerate.intValue;
 
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(reinitializeDisplayLayer)
+                                             selector:@selector(updateDisplayLayerLayout)
                                                  name:@"ScreenChanged"
                                                object:nil];
-
-    @synchronized([VideoDecoderRenderer class]) {
-        sActiveRenderer = self;
-    }
 
     // Renderer init runs on the main thread, so reading applicationState here is legal.
     // The decode queue reads the cached flag instead (UIKit forbids off-main reads).
@@ -256,7 +235,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
 
 - (void)restartDisplayLinkForInterpolationEnabled:(BOOL)enabled {
     dispatch_block_t restartBlock = ^{
-        if (self->_renderingBackend != RENDER_AVSB || self->_displayLink == nil) {
+        if (self->_cleanupRequested || self->_renderingBackend != RENDER_AVSB || self->_displayLink == nil) {
             return;
         }
 
@@ -284,6 +263,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
 
 - (void)invalidateDecompressionSession {
     @synchronized(self) {
+        SunlightDecoderRecoveryInvalidate(&_decoderRecovery);
         if (self->_decompressionSession != NULL) {
             VTDecompressionSessionInvalidate(self->_decompressionSession);
             CFRelease(self->_decompressionSession);
@@ -292,35 +272,76 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     }
 }
 
+- (void)setDecodingPausedForBackground:(BOOL)paused {
+    @synchronized(self) {
+        if (_cleanupRequested || (!self.stereoPresentation &&
+            (_framePacingMode == FramePacingModeLegacy || _framePacingMode == FramePacingModeOff))) return;
+        BOOL changed = _decoderRecovery.paused != paused;
+        SunlightDecoderRecoverySetPaused(&_decoderRecovery, paused);
+        if (changed && paused) [self invalidateDecompressionSession];
+        // The next compressed frame requests recovery through DR_NEED_IDR.
+        // Construction/foreground callbacks must not touch another C session.
+    }
+}
+
+- (FrameInterpolator *)newFrameInterpolatorWithMaximumDimension:(NSInteger)dimension
+                                             maximumPixelCount:(NSInteger)count {
+    FrameInterpolator *interpolator = [[FrameInterpolator alloc] initWithMaximumDimension:dimension maximumPixelCount:count];
+    __weak VideoDecoderRenderer *weakSelf = self;
+    __weak FrameInterpolator *weakInterpolator = interpolator;
+    interpolator.transientHUDHandler = ^(NSString *text) {
+        VideoDecoderRenderer *owner = weakSelf;
+        FrameInterpolator *source = weakInterpolator;
+        if (!owner || !source) return;
+        id<ConnectionCallbacks> callbacks;
+        @synchronized(owner) {
+            if (owner->_cleanupRequested || owner->_frameInterpolator != source) return;
+            callbacks = owner->_callbacks;
+        }
+        if ([callbacks respondsToSelector:@selector(updateTransientHUDText:)]) [callbacks updateTransientHUDText:text];
+    };
+    return interpolator;
+}
+
+- (void)setRequeuingRequired:(BOOL)required {
+    @synchronized(self) {
+        if (!_activatedForStreaming || _cleanupRequested || _queueSize == 0) return;
+        [_frameQueue clear];
+        _needRequeuing = required;
+    }
+}
+
 - (void)startOrRestartFrameInterpolation {
     if (self->_displayLink == nil || self->_renderingBackend != RENDER_AVSB) {
         return;
     }
 
-    DataManager *dataMan = [[DataManager alloc] init];
-    TemporarySettings *settings = [dataMan getSettings];
+    TemporarySettings *settings = _presentationSettings ?: [[[DataManager alloc] init] getSettings];
     NSInteger maximumDimension = settings.interpolationMaximumDimension.integerValue;
     NSInteger maximumPixelCount = settings.interpolationMaximumPixelCount.integerValue;
 
     dispatch_async(self->_vtq, ^{
-        FrameInterpolator *oldInterpolator = self->_frameInterpolator;
-        self->_frameInterpolator = [[FrameInterpolator alloc]
-            initWithMaximumDimension:maximumDimension
-            maximumPixelCount:maximumPixelCount];
-        self->_frameInterpolator.isEnabled = YES;
-        self->_frameInterpolationPaused = NO;
-        [oldInterpolator reset];
+        @synchronized(self) {
+            // Cleanup holds this same monitor until it retires queue ownership.
+            // A queued request from an old session must never clear a new queue.
+            if (!self->_activatedForStreaming || self->_cleanupRequested) return;
+            FrameInterpolator *oldInterpolator = self->_frameInterpolator;
+            self->_frameInterpolator = [self newFrameInterpolatorWithMaximumDimension:maximumDimension maximumPixelCount:maximumPixelCount];
+            self->_frameInterpolator.isEnabled = YES;
+            self->_frameInterpolationPaused = NO;
+            [oldInterpolator reset];
 
-        self->_queueSize = 8;
-        self->_needRequeuing = YES;
-        [self->_frameQueue setHighWaterMark:self->_queueSize];
-        [self->_frameQueue clear];
-        [self invalidateDecompressionSession];
-        [self restartDisplayLinkForInterpolationEnabled:YES];
-        LiRequestIdrFrame();
+            self->_queueSize = 8;
+            self->_needRequeuing = YES;
+            [self->_frameQueue setHighWaterMark:self->_queueSize];
+            [self->_frameQueue clear];
+            [self invalidateDecompressionSession];
+            [self restartDisplayLinkForInterpolationEnabled:YES];
+            // invalidateDecompressionSession arms the coalesced DR_NEED_IDR path.
 
-        Log(LOG_I, @"Frame interpolation started or restarted with limits %ld / %ld pixels",
-            (long)maximumDimension, (long)maximumPixelCount);
+            Log(LOG_I, @"Frame interpolation started or restarted with limits %ld / %ld pixels",
+                (long)maximumDimension, (long)maximumPixelCount);
+        }
     });
 }
 
@@ -329,25 +350,29 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
         return;
     }
 
-    DataManager *dataMan = [[DataManager alloc] init];
-    TemporarySettings *settings = [dataMan getSettings];
+    TemporarySettings *settings = _presentationSettings ?: [[[DataManager alloc] init] getSettings];
     NSInteger normalQueueSize = settings.frameQueueSize.integerValue;
 
     dispatch_async(self->_vtq, ^{
-        FrameInterpolator *oldInterpolator = self->_frameInterpolator;
-        self->_frameInterpolator = nil;
-        self->_frameInterpolationPaused = NO;
-        [oldInterpolator reset];
+        @synchronized(self) {
+            // Cleanup holds this same monitor until it retires queue ownership.
+            // A queued request from an old session must never clear a new queue.
+            if (!self->_activatedForStreaming || self->_cleanupRequested) return;
+            FrameInterpolator *oldInterpolator = self->_frameInterpolator;
+            self->_frameInterpolator = nil;
+            self->_frameInterpolationPaused = NO;
+            [oldInterpolator reset];
 
-        self->_queueSize = (int32_t)normalQueueSize;
-        self->_needRequeuing = self->_queueSize > 0;
-        [self->_frameQueue setHighWaterMark:MAX(1, self->_queueSize)];
-        [self->_frameQueue clear];
-        [self invalidateDecompressionSession];
-        [self restartDisplayLinkForInterpolationEnabled:NO];
-        LiRequestIdrFrame();
+            self->_queueSize = (int32_t)normalQueueSize;
+            self->_needRequeuing = self->_queueSize > 0;
+            [self->_frameQueue setHighWaterMark:MAX(1, self->_queueSize)];
+            [self->_frameQueue clear];
+            [self invalidateDecompressionSession];
+            [self restartDisplayLinkForInterpolationEnabled:NO];
+            // invalidateDecompressionSession arms the coalesced DR_NEED_IDR path.
 
-        Log(LOG_I, @"Frame interpolation stopped");
+            Log(LOG_I, @"Frame interpolation stopped");
+        }
     });
 }
 
@@ -371,14 +396,17 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     // reset plot data in case we've already used it for a previous renderer
     [[ImGuiPlots sharedInstance] clearData];
 
-    DataManager* dataMan = [[DataManager alloc] init];
-    TemporarySettings* settings = [dataMan getSettings];
-    if ([settings.renderingBackend integerValue] == RENDER_AVSB) {
+    TemporarySettings* settings = _presentationSettings ?: [[[DataManager alloc] init] getSettings];
+    if (self.stereoPresentation) {
+        // Set before the first decode unit is submitted. Stereo has one Metal
+        // queue consumer and must decode through VT even if 2D uses Legacy/Off.
+        _framePacingMode = FramePacingModeQueue;
+    }
+    if (!self.stereoPresentation && [settings.renderingBackend integerValue] == RENDER_AVSB) {
         _renderingBackend = RENDER_AVSB;
         
         if (kEnableFrameInterpolation) {
-            _frameInterpolator = [[FrameInterpolator alloc]
-                initWithMaximumDimension:settings.interpolationMaximumDimension.integerValue
+            _frameInterpolator = [self newFrameInterpolatorWithMaximumDimension:settings.interpolationMaximumDimension.integerValue
                 maximumPixelCount:settings.interpolationMaximumPixelCount.integerValue];
             _frameInterpolator.isEnabled = YES;
         }
@@ -434,7 +462,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     return status;
 }
 
-- (void)setupDecompressionSession {
+- (OSStatus)setupDecompressionSession {
 #if TARGET_OS_SIMULATOR
     NSNumber *pixelFormat = @(kCVPixelFormatType_32BGRA);
     NSMutableDictionary *destinationPixelBufferAttributes = [@{
@@ -485,8 +513,7 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
 
 #if !TARGET_OS_SIMULATOR
     if (!interpolationRequested) {
-        [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
-        return;
+        return [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
     }
 
     OSStatus status = [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
@@ -501,14 +528,14 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
             destinationPixelBufferAttributes[(id)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder] = @YES;
             destinationPixelBufferAttributes[(id)kVTDecompressionPropertyKey_GeneratePerFrameHDRDisplayMetadata] = @YES;
         }
-        [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
+        status = [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
 
         [self restartDisplayLinkForInterpolationEnabled:NO];
     }
+    return status;
 #else
-    [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
+    return [self setupDecompressionSessionWithAttributes:destinationPixelBufferAttributes];
 #endif
-    return;
 }
 
 - (void) checkDisplayLayer {
@@ -517,13 +544,10 @@ extern int ff_isom_write_av1c(AVIOContext *pb, const uint8_t *buf, int size,
     if (self->_displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
         // Log(LOG_E, @"Display layer rendering failed: %@", _displayLayer.error);
 
-        // Recreate the display layer. We are already on the main thread,
-        // so this is safe to do right here.
+        // AVSB presents already-decoded images. Flush its failed presentation
+        // state on main; the separate VT decoder and its references stay valid.
         [self->_displayLayer flushAndRemoveImage];
-        [self reinitializeDisplayLayer];
-
-        // Request an IDR frame to initialize the new decoder
-        LiRequestIdrFrame();
+        [self updateDisplayLayerLayout];
     }
 }
 
@@ -537,6 +561,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 // DisplayLink calls us every vsync we we try to present the most recent frame. We try to maintain a user-configurable buffer
 // of 1-5 frames. If the buffer is full, every other frame is dropped which just appears to the user as a lower framerate stream. */
 - (void)renderModeAVSB:(CADisplayLink *)link {
+    if (_cleanupRequested) return;
     // NSTimeInterval current = link.targetTimestamp;
     // NSLog(@"link %f", link.duration);
     // previousLinkTime = current;
@@ -570,7 +595,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     // if(true){
         _needRequeuing = false;
         if(_asyncFrameDequeue){
-            [_frameQueue dequeueWithTimeout:waitFor completion:^(Frame *frame) {
+            [_frameQueue dequeueWithTimeout:waitFor owner:self completion:^(Frame *frame) {
                 if (frame) {
                     // LogOnce(LOG_I, @"Frame pacing: using AVSampleBufferDisplayLayer target %f Hz with %d FPS stream", 1.0f / (deadline - start), self->_frameRate);
                     [self renderFrame:frame atTime:CMTimeMakeWithSeconds(targetTime, NSEC_PER_SEC)];
@@ -578,7 +603,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
             }];
         }
         else{
-            Frame *frame = [_frameQueue dequeueWithTimeoutSync:waitFor];
+            Frame *frame = [_frameQueue dequeueWithTimeoutSync:waitFor owner:self];
             if (frame) {
                 // CFTimeInterval dl1 = CACurrentMediaTime();
                 
@@ -617,10 +642,11 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 // Legacy frame pacing callback - matches upstream/Integration behavior exactly
 - (void)displayLinkCallback:(CADisplayLink *)sender
 {
+    if (_cleanupRequested) return;
     VIDEO_FRAME_HANDLE handle;
     PDECODE_UNIT du;
     
-    while (LiPollNextVideoFrame(&handle, &du)) {
+    while (!_cleanupRequested && LiPollNextVideoFrame(&handle, &du)) {
         LiCompleteVideoFrame(handle, DrSubmitDecodeUnit(du));
         
         // Skip frame pacing logic if frame pacing is off
@@ -644,9 +670,7 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 
 // Render frame at a specific targetTime
 - (void)renderFrame:(Frame *)frame atTime:(CMTime)targetTime {
-    // if (kEnableFrameInterpolation && self->_frameInterpolator != nil) {
-        // [self logColorMetadataForFrameIfNeeded:frame];
-    // }
+    if (_cleanupRequested || frame.sampleBuffer == NULL) return;
     
     CMSampleBufferSetOutputPresentationTimeStamp(frame.sampleBuffer, targetTime);
 
@@ -705,105 +729,63 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     }
 }
 
-/*
-- (void)logColorMetadataForFrameIfNeeded:(Frame *)frame {
-    BOOL *logged = frame.isInterpolated ?
-        &_loggedInterpolatedFrameColorMetadata :
-        &_loggedSourceFrameColorMetadata;
-    if (*logged || frame.sampleBuffer == nil) {
-        return;
-    }
-    *logged = YES;
-
-    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer);
-    CMFormatDescriptionRef formatDescription = CMSampleBufferGetFormatDescription(frame.sampleBuffer);
-    if (imageBuffer == nil) {
-        Log(LOG_W, @"[FrameColor] %@ frame has no image buffer",
-            frame.isInterpolated ? @"interpolated" : @"source");
-        return;
-    }
-
-    OSType pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer);
-    char fourCC[5] = {
-        (char)((pixelFormat >> 24) & 0xff),
-        (char)((pixelFormat >> 16) & 0xff),
-        (char)((pixelFormat >> 8) & 0xff),
-        (char)(pixelFormat & 0xff),
-        '\0'
-    };
-
-    CFTypeRef bufferTransfer = CVBufferGetAttachment(
-        imageBuffer, kCVImageBufferTransferFunctionKey, NULL);
-    CFTypeRef bufferPrimaries = CVBufferGetAttachment(
-        imageBuffer, kCVImageBufferColorPrimariesKey, NULL);
-    CFTypeRef bufferMatrix = CVBufferGetAttachment(
-        imageBuffer, kCVImageBufferYCbCrMatrixKey, NULL);
-    CFTypeRef bufferMastering = CVBufferGetAttachment(
-        imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey, NULL);
-    CFTypeRef bufferContentLight = CVBufferGetAttachment(
-        imageBuffer, kCVImageBufferContentLightLevelInfoKey, NULL);
-
-    CFDictionaryRef extensions = formatDescription != nil ?
-        CMFormatDescriptionGetExtensions(formatDescription) : NULL;
-    CFTypeRef formatTransfer = extensions != NULL ?
-        CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_TransferFunction) : NULL;
-    CFTypeRef formatPrimaries = extensions != NULL ?
-        CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_ColorPrimaries) : NULL;
-    CFTypeRef formatMatrix = extensions != NULL ?
-        CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_YCbCrMatrix) : NULL;
-    CFTypeRef formatMastering = extensions != NULL ?
-        CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_MasteringDisplayColorVolume) : NULL;
-    CFTypeRef formatContentLight = extensions != NULL ?
-        CFDictionaryGetValue(extensions, kCMFormatDescriptionExtension_ContentLightLevelInfo) : NULL;
-
-    Log(LOG_I,
-        @"[FrameColor] %@ frame: %dx%d pixelFormat=%s (%u); "
-         "buffer transfer=%@ primaries=%@ matrix=%@ mastering=%@ contentLight=%@; "
-         "format transfer=%@ primaries=%@ matrix=%@ mastering=%@ contentLight=%@",
-        frame.isInterpolated ? @"interpolated" : @"source",
-        (int)CVPixelBufferGetWidth(imageBuffer),
-        (int)CVPixelBufferGetHeight(imageBuffer),
-        fourCC,
-        (unsigned int)pixelFormat,
-        (__bridge id)bufferTransfer,
-        (__bridge id)bufferPrimaries,
-        (__bridge id)bufferMatrix,
-        bufferMastering != NULL ? @"present" : @"nil",
-        bufferContentLight != NULL ? @"present" : @"nil",
-        (__bridge id)formatTransfer,
-        (__bridge id)formatPrimaries,
-        (__bridge id)formatMatrix,
-        formatMastering != NULL ? @"present" : @"nil",
-        formatContentLight != NULL ? @"present" : @"nil");
-} */
- 
 - (void)stop{
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_displayLink invalidate];
+    dispatch_block_t stopDisplayLink = ^{ [self->_displayLink invalidate]; };
+    if (NSThread.isMainThread) stopDisplayLink();
+    else dispatch_sync(dispatch_get_main_queue(), stopDisplayLink);
+}
+
+- (void)activateForStreaming {
+    @synchronized(self) {
+        if (_activatedForStreaming || _cleanupRequested) return;
+        _activatedForStreaming = YES;
+        _videoTimestamp = (SunlightVideoTimestamp){0};
+        appDidEnterBackgroundWithoutPip = false;
+        [_frameQueue startForOwner:self];
+        [_frameQueue setHighWaterMark:MAX(1, _queueSize)];
+        @synchronized([VideoDecoderRenderer class]) {
+            sActiveRenderer = self;
+        }
+    }
 }
 
 - (void)cleanup{
-    @synchronized([VideoDecoderRenderer class]) {
-        if (sActiveRenderer == self) {
-            sActiveRenderer = nil;
+    @synchronized(self) {
+        if (_cleanupRequested) return;
+        _cleanupRequested = YES;
+        // Stop before the lifecycle releases ownership. A decoder cancelled
+        // before activation must never pause another session's shared queue.
+        if (_activatedForStreaming) [_frameQueue stopForOwner:self];
+        @synchronized([VideoDecoderRenderer class]) {
+            if (sActiveRenderer == self) sActiveRenderer = nil;
         }
     }
+    // The lifecycle cannot publish another C session while an old display link
+    // can still poll its global video queue. Drain main-thread callbacks first.
+    [self stop];
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self->_frameQueue stopForOwner:self];
-        
-        if (self->_renderingBackend == RENDER_AVSB) {
-            [self->_displayLink invalidate];
-        }
         @synchronized(self) {
             if (self->_decompressionSession != NULL) {
                 VTDecompressionSessionInvalidate(self->_decompressionSession);
                 CFRelease(self->_decompressionSession);
                 self->_decompressionSession = nil;
             }
+            if (self->_formatDesc != NULL) {
+                CFRelease(self->_formatDesc);
+                self->_formatDesc = NULL;
+            }
+            if (self->_formatDescImageBuffer != NULL) {
+                CFRelease(self->_formatDescImageBuffer);
+                self->_formatDescImageBuffer = NULL;
+            }
         }
-        if (self->_frameInterpolator != nil) {
+    });
+    dispatch_async(_vtq, ^{
+        @synchronized(self) {
             [self->_frameInterpolator reset];
+            self->_frameInterpolator = nil;
         }
     });
 }
@@ -1079,6 +1061,18 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
 {
     OSStatus status;
 
+    if (bufferType == BUFFER_TYPE_PICDATA) {
+        @synchronized(self) {
+            if (_cleanupRequested || _decoderRecovery.paused) {
+                // Parameter sets preceding a paused IDR belong to this frame;
+                // discard them with its picture instead of accumulating them.
+                [_parameterSetBuffers removeAllObjects];
+                free(data);
+                return DR_OK;
+            }
+        }
+    }
+
     // Construct a new format description object each time we receive an IDR frame
     if (du->frameType == FRAME_TYPE_IDR) {
         if (bufferType != BUFFER_TYPE_PICDATA) {
@@ -1194,8 +1188,10 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
             if (fabsf(newAspectRatio - _streamAspectRatio) > 0.001f) {
                 Log(LOG_I, @"Resolution change detected in IDR frame: %dx%d (aspect ratio %.4f -> %.4f)",
                     dimensions.width, dimensions.height, _streamAspectRatio, newAspectRatio);
+                _streamAspectRatio = newAspectRatio;
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [self reinitializeDisplayLayer];
+                    if (self->_cleanupRequested) return;
+                    [self updateDisplayLayerLayout];
                     // Post notification so StreamFrameViewController can update the StreamView's aspect ratio
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"StreamAspectRatioChanged"
                                                                         object:self
@@ -1257,19 +1253,17 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
         status = CMBlockBufferAppendBufferReference(frameBlockBuffer, dataBlockBuffer, 0, length, 0);
         if (status != noErr) {
             Log(LOG_E, @"CMBlockBufferAppendBufferReference failed: %d", (int)status);
+            CFRelease(dataBlockBuffer);
+            CFRelease(frameBlockBuffer);
             return DR_NEED_IDR;
         }
     }
 
     CMSampleBufferRef sampleBuffer;
-    CMTime presentationTimeStamp;
-    if (_framePacingMode == FramePacingModeLegacy || _framePacingMode == FramePacingModeOff) {
-        presentationTimeStamp = CMTimeMake(du->presentationTimeUs / 1000, 1000);
-    } else {
-        presentationTimeStamp = CMTimeMake((int64_t)du->rtpTimestamp, 90000);
-    }
-    // Set the current frame's pts, in RTP 90khz units. We will set the duration
-    // later in FrameQueue because it requires the next frame's timestamp.
+    CMTime presentationTimeStamp = SunlightVideoPresentationTime(&_videoTimestamp, du);
+    int decodeResult = DR_OK;
+    // All backends use the shared core's presentation clock. FrameQueue derives
+    // duration from the next frame; receive/enqueue times are different clocks.
     CMSampleTimingInfo sampleTiming = {
         .duration = kCMTimeInvalid,
         .presentationTimeStamp = presentationTimeStamp,
@@ -1301,10 +1295,13 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
             [self->_callbacks videoContentShown];
         }
     } else {
+        BOOL requestRefresh = NO;
         OSStatus decodeStatus = [self decodeFrameWithSampleBuffer:sampleBuffer
                                                       frameNumber:du->frameNumber
                                                         frameType:du->frameType
-                                                  decodeStartTime:decodeStartTime];
+                                                  decodeStartTime:decodeStartTime
+                                                    requestRefresh:&requestRefresh];
+        if (decodeStatus != noErr && requestRefresh) decodeResult = DR_NEED_IDR;
     }
 
     // Dereference the buffers
@@ -1312,36 +1309,113 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     CFRelease(frameBlockBuffer);
     CFRelease(sampleBuffer);
 
-    return DR_OK;
+    return decodeResult;
+}
+
+// Called only by the synchronous VT output callback. The decode caller keeps
+// its input sample (and format description) alive until that callback returns.
+- (void)recordIncomingFrameTiming:(Frame *)frame {
+    // Called once, in decoded input order, before asynchronous interpolation.
+    // GPU completions/drops may arrive in a different order and a new stream
+    // has its own timestamp origin, so neither may drive this baseline.
+    CFTimeInterval pts = frame.pts;
+    if (_appInBackground || !isfinite(pts)) {
+        _hasLastDecodedFramePTS = NO;
+        return;
+    }
+    if (_hasLastDecodedFramePTS && pts > _lastDecodedFramePTS) {
+        [[ImGuiPlots sharedInstance] observeFloat:PLOT_HOST_FRAMETIME value:(pts - _lastDecodedFramePTS) * 1000.0];
+    }
+    _lastDecodedFramePTS = pts;
+    _hasLastDecodedFramePTS = YES;
+}
+
+- (Frame *)frameForDecodedImage:(CVImageBufferRef)imageBuffer
+             formatDescription:(CMVideoFormatDescriptionRef)formatDescription
+                     timestamp:(CMTime)timestamp duration:(CMTime)duration
+                   frameNumber:(int)frameNumber frameType:(int)frameType
+                        status:(OSStatus *)status {
+    *status = noErr;
+    if (imageBuffer == NULL) {
+        *status = kVTVideoDecoderBadDataErr;
+        return nil;
+    }
+    if (_renderingBackend == RENDER_AVSB) {
+        if (_formatDescImageBuffer == NULL || !CMVideoFormatDescriptionMatchesImageBuffer(_formatDescImageBuffer, imageBuffer)) {
+            CMVideoFormatDescriptionRef replacement = NULL;
+            *status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &replacement);
+            if (*status != noErr) return nil;
+            if (_formatDescImageBuffer != NULL) CFRelease(_formatDescImageBuffer);
+            _formatDescImageBuffer = replacement;
+        }
+        CMSampleTimingInfo timing = { .duration = duration,
+            .presentationTimeStamp = timestamp, .decodeTimeStamp = kCMTimeInvalid };
+        CMSampleBufferRef sample = NULL;
+        *status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, imageBuffer,
+            _formatDescImageBuffer, &timing, &sample);
+        if (*status != noErr) return nil;
+        return [[Frame alloc] initWithSampleBuffer:sample frameNumber:frameNumber frameType:frameType];
+    }
+    Frame *frame = [[Frame alloc] initWithPixelBufffer:CVPixelBufferRetain(imageBuffer)
+        frameNumber:frameNumber frameType:frameType pts:timestamp];
+    [frame setFormatDesc:formatDescription];
+    return frame;
 }
 
 - (OSStatus)decodeFrameWithSampleBuffer:(CMSampleBufferRef)sampleBuffer
                             frameNumber:(int)frameNumber
                               frameType:(int)frameType
                         decodeStartTime:(CFTimeInterval)decodeStartTime {
+    BOOL requestRefresh = NO;
+    OSStatus status = [self decodeFrameWithSampleBuffer:sampleBuffer frameNumber:frameNumber
+        frameType:frameType decodeStartTime:decodeStartTime requestRefresh:&requestRefresh];
+    // External callers do not have a decode-unit result to return to common.
+    if (requestRefresh) {
+        @synchronized(self) {
+            if (_activatedForStreaming && !_cleanupRequested) LiRequestIdrFrame();
+        }
+    }
+    return status;
+}
+
+- (OSStatus)decodeFrameWithSampleBuffer:(CMSampleBufferRef)sampleBuffer
+                          frameNumber:(int)frameNumber
+                            frameType:(int)frameType
+                      decodeStartTime:(CFTimeInterval)decodeStartTime
+                        requestRefresh:(BOOL *)requestRefresh {
+    *requestRefresh = NO;
     // Synchronize access to decompression session to prevent race conditions during background/foreground transitions
     @synchronized(self) {
-        // Check if we need to create/recreate the decompression session
-        BOOL needsNewSession = (frameType == FRAME_TYPE_IDR || _decompressionSession == nil);
+        if (_cleanupRequested) return kVTInvalidSessionErr;
+        if (_decoderRecovery.paused) return noErr;
+        BOOL isIDR = frameType == FRAME_TYPE_IDR;
+        if (_decompressionSession == nil) SunlightDecoderRecoveryInvalidate(&_decoderRecovery);
 
-        // Also check if the session might have been invalidated by iOS during background
-        if (!needsNewSession && _decompressionSession != nil) {
-            Boolean isValid = VTDecompressionSessionCanAcceptFormatDescription(_decompressionSession, _formatDesc);
-            if (!isValid) {
-                Log(LOG_W, @"Decompression session is invalid, needs recreation");
-                needsNewSession = YES;
+        if (!isIDR && _decompressionSession != nil &&
+            !VTDecompressionSessionCanAcceptFormatDescription(_decompressionSession, _formatDesc)) {
+            [self invalidateDecompressionSession];
+        }
+        if (!SunlightDecoderRecoveryCanDecode(&_decoderRecovery, isIDR)) {
+            *requestRefresh = SunlightDecoderRecoveryRequestIDR(&_decoderRecovery, CACurrentMediaTime());
+            return kVTVideoDecoderReferenceMissingErr;
+        }
+
+        if (isIDR) {
+            SunlightDecoderRecoveryInvalidate(&_decoderRecovery);
+            OSStatus setupStatus = [self setupDecompressionSession];
+            if (setupStatus != noErr) {
+                *requestRefresh = SunlightDecoderRecoveryRequestIDR(&_decoderRecovery, CACurrentMediaTime());
+                return setupStatus;
             }
         }
 
-        if (needsNewSession) {
-            [self setupDecompressionSession];
-        }
-
-        if (_decompressionSession == nil) {
-            Log(LOG_E, @"Failed to create decompression session");
-            return kVTInvalidSessionErr;
-        }
-
+        // With decodeFlags=0, VT completes the output callback before returning,
+        // but it may call it on another thread. Never acquire our decoder lock
+        // from that callback; collect its result and recover on this caller.
+        __block atomic_int callbackStatus;
+        atomic_init(&callbackStatus, noErr);
+        __block atomic_bool decodedImage;
+        atomic_init(&decodedImage, false);
         OSStatus status = VTDecompressionSessionDecodeFrameWithOutputHandler(
             _decompressionSession,
             sampleBuffer,
@@ -1349,129 +1423,99 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
             NULL,
             ^(OSStatus status, VTDecodeInfoFlags infoFlags, CVImageBufferRef _Nullable imageBuffer, CMTime presentationTimestamp, CMTime presentationDuration) {
                 if (status != noErr || !imageBuffer) {
-                    NSError *error = [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:nil];
-                    Log(LOG_E, @"Decompression session error: %@", error);
-                    if (status == kVTInvalidSessionErr) {
-                        // The session was invalidated by the OS. Destroy our reference
-                        // so it gets recreated on the next IDR frame.
-                        @synchronized(self) {
-                            if (self->_decompressionSession) {
-                                VTDecompressionSessionInvalidate(self->_decompressionSession);
-                                CFRelease(self->_decompressionSession);
-                                self->_decompressionSession = nil;
-                            }
-                        }
+                    if (status != noErr || !(infoFlags & kVTDecodeInfo_FrameDropped)) {
+                        atomic_store(&callbackStatus, status != noErr ? status : kVTVideoDecoderBadDataErr);
                     }
-                    LiRequestIdrFrame(); // Request an IDR to restart the stream
                     return;
                 }
+                OSStatus frameStatus = noErr;
+                Frame *frame = [self frameForDecodedImage:imageBuffer
+                    formatDescription:CMSampleBufferGetFormatDescription(sampleBuffer)
+                    timestamp:presentationTimestamp duration:presentationDuration
+                    frameNumber:frameNumber frameType:frameType status:&frameStatus];
+                if (!frame) {
+                    atomic_store(&callbackStatus, frameStatus);
+                    return;
+                }
+                atomic_store(&decodedImage, true);
 
-                CMSampleBufferRef sampleBufferOut = nil;
-                CVPixelBufferRef pixelBuffer = nil;
+                // Frame owns its pixel/sample buffer and this input's format
+                // metadata before crossing the decode/presentation boundary.
+                dispatch_async(self->_vtq, ^{
+                    @synchronized(self) {
+                        if (self->_cleanupRequested) return;
+                        [self recordIncomingFrameTiming:frame];
+                        FrameInterpolator *interpolator = self->_frameInterpolator;
+                        if (interpolator != nil && appDidEnterBackgroundWithoutPip) {
+                            if (!self->_frameInterpolationPaused) {
+                                self->_frameInterpolationPaused = YES;
+                                [interpolator setPaused:YES];
+                            }
+                        }
+                        else if (interpolator != nil) {
+                            if (self->_frameInterpolationPaused) {
+                                self->_frameInterpolationPaused = NO;
+                                [interpolator setPaused:NO];
+                            }
+                            [interpolator processFrame:frame completion:^(NSArray *frames) {
+                                dispatch_async(self->_vtq, ^{
+                                    @synchronized(self) {
+                                        if (self->_cleanupRequested || self->_frameInterpolator != interpolator) {
+                                            return;
+                                        }
 
-                // AVSampleBuffer path: package into a SampleBuffer
-                if (self->_renderingBackend == RENDER_AVSB) {
-                    if (self->_formatDescImageBuffer == NULL || !CMVideoFormatDescriptionMatchesImageBuffer(self->_formatDescImageBuffer, imageBuffer)) {
-                        OSStatus res = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &(self->_formatDescImageBuffer));
-                        if (res != noErr) {
-                            Log(LOG_E, @"Failed to create video format description from imageBuffer");
+                                        int framesDropped = frames.count == 0 ? 1 : 0;
+                                        if (framesDropped) [self->_frameQueue recordDroppedFrameForOwner:self];
+                                        for (Frame *outputFrame in (NSArray<Frame *> *)frames) {
+                                            framesDropped += [self->_frameQueue enqueue:outputFrame withSlackSize:3 owner:self];
+                                        }
+
+                                        if (!self->_appInBackground) {
+                                            static PlotMetrics frameQueueMetrics = {};
+                                            [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_QUEUED_FRAMES value:[self->_frameQueue count] plotMetrics:&frameQueueMetrics];
+                                            [self safeCopyMetricsTo:&self->_frameQueueMetrics from:&frameQueueMetrics];
+
+                                            [[ImGuiPlots sharedInstance] observeFloat:PLOT_DROPPED value:framesDropped];
+
+                                            static PlotMetrics decodeMetrics = {};
+                                            [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_DECODE value:(CACurrentMediaTime() - decodeStartTime) * 1000.0 plotMetrics:&decodeMetrics];
+                                            [self safeCopyMetricsTo:&self->_decodeMetrics from:&decodeMetrics];
+                                        }
+                                    }
+                                });
+                            }];
                             return;
                         }
-                    }
 
-                    CMSampleTimingInfo sampleTiming = {kCMTimeInvalid, presentationTimestamp, presentationDuration};
+                        int framesDropped = [self->_frameQueue enqueue:frame withSlackSize:3 owner:self];
 
-                    OSStatus err =
-                        CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, imageBuffer, self->_formatDescImageBuffer, &sampleTiming, &sampleBufferOut);
-                    if (err != noErr) {
-                        Log(LOG_E, @"Error creating sample buffer for decompressed image buffer %d", (int)err);
-                        return;
-                    }
-                } else if (self->_renderingBackend == RENDER_METAL) {
-                    // Metal path: retain the pixelBuffer here so it survives the dispatch
-                    pixelBuffer = CVPixelBufferRetain((CVPixelBufferRef)imageBuffer);
-                }
+                        if (!self->_appInBackground) {
+                            static PlotMetrics frameQueueMetrics = {};
+                            [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_QUEUED_FRAMES value:[self->_frameQueue count] plotMetrics:&frameQueueMetrics];
+                            [self safeCopyMetricsTo:&self->_frameQueueMetrics from:&frameQueueMetrics];
 
-                // Dispatch onto our higher priority queue
-                dispatch_async(self->_vtq, ^{
-                    Frame *frame = nil;
-                    if (self->_renderingBackend == RENDER_AVSB) {
-                        frame = [[Frame alloc] initWithSampleBuffer:sampleBufferOut frameNumber:frameNumber frameType:frameType];
-                    } else {
-                        frame = [[Frame alloc] initWithPixelBufffer:pixelBuffer frameNumber:frameNumber frameType:frameType pts:presentationTimestamp];
-                        [frame setFormatDesc:self->_formatDesc];
-                    }
+                            [[ImGuiPlots sharedInstance] observeFloat:PLOT_DROPPED value:framesDropped];
 
-                    FrameInterpolator *interpolator = self->_frameInterpolator;
-                    if (interpolator != nil && appDidEnterBackgroundWithoutPip) {
-                        if (!self->_frameInterpolationPaused) {
-                            self->_frameInterpolationPaused = YES;
-                            [interpolator setPaused:YES];
+                            // Decode time is not graphed because it is marked as hidden, but we can use the same mechanism for the value used by stats
+                            static PlotMetrics decodeMetrics = {};
+                            [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_DECODE value:(CACurrentMediaTime() - decodeStartTime) * 1000.0 plotMetrics:&decodeMetrics];
+                            [self safeCopyMetricsTo:&self->_decodeMetrics from:&decodeMetrics];
                         }
-                    }
-                    else if (interpolator != nil) {
-                        if (self->_frameInterpolationPaused) {
-                            self->_frameInterpolationPaused = NO;
-                            [interpolator setPaused:NO];
-                        }
-                        [interpolator processFrame:frame completion:^(NSArray *frames) {
-                            dispatch_async(self->_vtq, ^{
-                                if (self->_frameInterpolator != interpolator) {
-                                    return;
-                                }
-
-                                int framesDropped = 0;
-                                for (Frame *outputFrame in (NSArray<Frame *> *)frames) {
-                                    framesDropped += [self->_frameQueue enqueue:outputFrame withSlackSize:3];
-                                }
-
-                                if (!self->_appInBackground) {
-                                    static PlotMetrics frameQueueMetrics = {};
-                                    [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_QUEUED_FRAMES value:[self->_frameQueue count] plotMetrics:&frameQueueMetrics];
-                                    [self safeCopyMetricsTo:&self->_frameQueueMetrics from:&frameQueueMetrics];
-
-                                    [[ImGuiPlots sharedInstance] observeFloat:PLOT_DROPPED value:framesDropped];
-
-                                    static CFTimeInterval lastHostFrame = 0.0f;
-                                    if (lastHostFrame != 0) {
-                                        [[ImGuiPlots sharedInstance] observeFloat:PLOT_HOST_FRAMETIME value:(frame.pts - lastHostFrame) * 1000.0];
-                                    }
-                                    lastHostFrame = frame.pts;
-
-                                    static PlotMetrics decodeMetrics = {};
-                                    [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_DECODE value:(CACurrentMediaTime() - decodeStartTime) * 1000.0 plotMetrics:&decodeMetrics];
-                                    [self safeCopyMetricsTo:&self->_decodeMetrics from:&decodeMetrics];
-                                }
-                            });
-                        }];
-                        return;
-                    }
-
-                    int framesDropped = [self->_frameQueue enqueue:frame withSlackSize:3];
-
-                    if (!self->_appInBackground) {
-                        static PlotMetrics frameQueueMetrics = {};
-                        [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_QUEUED_FRAMES value:[self->_frameQueue count] plotMetrics:&frameQueueMetrics];
-                        [self safeCopyMetricsTo:&self->_frameQueueMetrics from:&frameQueueMetrics];
-
-                        [[ImGuiPlots sharedInstance] observeFloat:PLOT_DROPPED value:framesDropped];
-
-                        // It's important we capture host metrics on the incoming thread, as this frame object
-                        // may have been dropped by the above enqueue
-                        static CFTimeInterval lastHostFrame = 0.0f;
-                        if (lastHostFrame != 0) {
-                            [[ImGuiPlots sharedInstance] observeFloat:PLOT_HOST_FRAMETIME value:(frame.pts - lastHostFrame) * 1000.0];
-                        }
-                        lastHostFrame = frame.pts;
-
-                        // Decode time is not graphed because it is marked as hidden, but we can use the same mechanism for the value used by stats
-                        static PlotMetrics decodeMetrics = {};
-                        [[ImGuiPlots sharedInstance] observeFloatReturnMetrics:PLOT_DECODE value:(CACurrentMediaTime() - decodeStartTime) * 1000.0 plotMetrics:&decodeMetrics];
-                        [self safeCopyMetricsTo:&self->_decodeMetrics from:&decodeMetrics];
                     }
                 });
             });
 
+        if (status == noErr) status = atomic_load(&callbackStatus);
+        if (status == noErr && isIDR && !atomic_load(&decodedImage)) {
+            status = kVTVideoDecoderReferenceMissingErr;
+        }
+        if (status != noErr) {
+            [self invalidateDecompressionSession];
+            *requestRefresh = SunlightDecoderRecoveryRequestIDR(&_decoderRecovery, CACurrentMediaTime());
+            if (*requestRefresh) Log(LOG_W, @"Video decoder recovery requested after status %d", (int)status);
+        } else if (isIDR && atomic_load(&decodedImage)) {
+            SunlightDecoderRecoveryDecodedIDR(&_decoderRecovery);
+        }
         return status;
     }
 }
@@ -1580,73 +1624,15 @@ int DrSubmitDecodeUnit(PDECODE_UNIT decodeUnit);
     return atomic_load_explicit(&_renderedInterpolatedFrameCount, memory_order_relaxed);
 }
 
-// When streaming lower framerate content on a ProMotion display, the screen refresh rate can be
-// reduced, optimizing battery life. Not currently used, it doesn't seem as reliable as I'd like.
-- (void)optimizeRefreshRate {
-    static NSArray<NSNumber *> *supportedRates;
-    static dispatch_once_t onceToken;
-    static int lastTargetRate = 0;
-    int targetRate = (int)_maxRefreshRate;
-
-    if (_maxRefreshRate <= 60 || _maxRefreshRate == 90) {
-        return;
-    }
-
-    dispatch_once(&onceToken, ^{
-        // https://developer.apple.com/documentation/quartzcore/optimizing-promotion-refresh-rates-for-iphone-13-pro-and-ipad-pro?language=objc
-        UIDevice *device = [UIDevice currentDevice];
-        if (device.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-            supportedRates = @[@24, @30, @40, @60, @120];
-        }
-        else if (device.userInterfaceIdiom == UIUserInterfaceIdiomPhone) {
-            supportedRates = @[@10, @12, @15, @16, @20, @24, @30, @40, @48, @60, @80, @120];
-        }
-        else {
-            supportedRates = @[@30, @60];
-        }
-    });
-
-    CFTimeInterval streamFps = [_frameQueue estimatedFramerate];
-    if (streamFps > _maxRefreshRate) {
-        streamFps = _maxRefreshRate;
-    }
-
-    for (NSNumber *r in supportedRates) {
-        NSInteger rate = r.integerValue;
-        if (rate >= (int)streamFps) {
-            targetRate = (int)rate;
-            break;
-        }
-    }
-
-    if (targetRate == lastTargetRate) {
-        return;
-    }
-    lastTargetRate = targetRate;
-
-    Log(LOG_I, @"optimizeRefreshRate: new rate %d Hz based on streamFps of %.2f fps", targetRate, streamFps);
-
-    if (@available(iOS 15.0, tvOS 15.0, *)) {
-        _displayLink.preferredFrameRateRange = CAFrameRateRangeMake(targetRate, _maxRefreshRate, targetRate);
-    }
-    else {
-        _displayLink.preferredFramesPerSecond = targetRate;
-    }
-}
-
 - (void)resetFramePacing {
     // Ensure this only runs for the AVSampleBuffer rendering backend and that the display link exists.
     if (_renderingBackend == RENDER_AVSB && _displayLink) {
         [self restartDisplayLinkForInterpolationEnabled:self->_frameInterpolator.isEnabled];
     } else if (_renderingBackend == RENDER_METAL) {
         @synchronized(self) {
-            if (_decompressionSession != nil) {
-                VTDecompressionSessionInvalidate(_decompressionSession);
-                CFRelease(_decompressionSession);
-                _decompressionSession = nil;
-            }
+            if (_cleanupRequested) return;
+            [self invalidateDecompressionSession];
         }
-        LiRequestIdrFrame();
     }
 }
 

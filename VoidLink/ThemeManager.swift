@@ -99,279 +99,71 @@ class ThemeManager: NSObject {
     }
     
     @objc static var menuBackgroundColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor(
-                red: 242.0/255.0,
-                green: 242.0/255.0,
-                blue: 247.0/255.0,
-                alpha: 1
-            )
-            
-        default:
-            if #available(iOS 13.0, *) {
-                let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-                return UIColor.secondarySystemBackground.resolvedColor(with: darkTraits)
-            } else {
-                return UIColor(
-                    red: 28.0/255.0,
-                    green: 28.0/255.0,
-                    blue: 30.0/255.0,
-                    alpha: 1
-                )
-            }
-        }
+        return SunlightUITheme.surfaceColor()
     }
     
     @objc static var hostViewBackgroundColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor(
-                red: 242.0/255.0,
-                green: 242.0/255.0,
-                blue: 247.0/255.0,
-                alpha: 1
-            )
-            
-        default:
-            if #available(iOS 13.0, *) {
-                let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-                return UIColor.systemGroupedBackground.resolvedColor(with: darkTraits)
-            } else {
-                return UIColor.black
-            }
-        }
+        return SunlightUITheme.sunkenColor()
     }
     
     @objc static var offlineHostIconBackgroundColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor(
-                red: 242.0/255.0,
-                green: 242.0/255.0,
-                blue: 247.0/255.0,
-                alpha: 1
-            )
-            
-        default:
-            return UIColor(
-                red: 17.0/255.0,
-                green: 17.0/255.0,
-                blue: 19.0/255.0,
-                alpha: 1
-            )
-        }
+        return SunlightUITheme.surfaceColor()
     }
     
     @objc static var widgetBackgroundColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor.white
-        default:
-            if #available(iOS 13.0, *) {
-                // return UIColor.secondarySystemBackground
-                let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-                return UIColor.secondarySystemGroupedBackground.resolvedColor(with: darkTraits)
-            } else {
-                return UIColor(
-                    red: 44.0/255.0,
-                    green: 44.0/255.0,
-                    blue: 46.0/255.0,
-                    alpha: 1
-                )
-            }
-        }
+        return SunlightUITheme.raisedColor()
     }
     
     @objc static var separatorColor: UIColor {
-        _ = setPublicUIStyle()
-        switch userInterfaceStyle() {
-        case .light:
-            if #available(iOS 13.0, *) {
-                let lightTraits = UITraitCollection(userInterfaceStyle: .light)
-                return PublicUtils.liquidGlassEnabled ? legacySepratorColor : UIColor.separator.resolvedColor(with: lightTraits)
-            } else {
-                return UIColor(
-                    red: 214.0/255.0,
-                    green: 214.0/255.0,
-                    blue: 218.0/255.0,
-                    alpha: 1
-                )
-            }
-        default:
-            if #available(iOS 13.0, *) {
-                let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-                return PublicUtils.liquidGlassEnabled ? legacySepratorColor : UIColor.separator.resolvedColor(with: darkTraits)
-            } else {return UIColor(white: 0.28, alpha: 1)}
-        }
+        return SunlightUITheme.borderColor()
     }
     
     @objc static var legacySepratorColor: UIColor {
-        _ = setPublicUIStyle()
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor(
-                red: 0.23529411764705882,
-                green: 0.23529411764705882,
-                blue: 0.2627450980392157,
-                alpha: 0.29
-            )
-        default:
-            return UIColor(
-                red: 0.32941176470588235,
-                green: 0.32941176470588235,
-                blue: 0.34509803921568627,
-                alpha: 0.6
-            )
-        }
+        return SunlightUITheme.borderColor()
     }
 
     @objc static var hostCardSeparatorColor: UIColor {
-        _ = setPublicUIStyle()
-        switch userInterfaceStyle() {
-        case .light:
-            if #available(iOS 13.0, *) {
-                let lightTraits = UITraitCollection(userInterfaceStyle: .light)
-                return UIColor.separator.resolvedColor(with: lightTraits)
-            } else {
-                return UIColor(
-                    red: 214.0/255.0,
-                    green: 214.0/255.0,
-                    blue: 218.0/255.0,
-                    alpha: 1
-                )
-            }
-        default:
-            if #available(iOS 13.0, *) {
-                let darkTraits = UITraitCollection(userInterfaceStyle: .dark)
-                return UIColor.separator.resolvedColor(with: darkTraits)
-            } else {return UIColor(white: 0.28, alpha: 1)}
-        }
+        return SunlightUITheme.borderColor()
     }
     
     @objc static var textColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor.black
-        default:
-            return UIColor.white
-        }
+        return SunlightUITheme.primaryTextColor()
     }
     
     @objc static var sectionLabelTextColor: UIColor {
-        _ = setPublicUIStyle()
-        
-        switch userInterfaceStyle() {
-        case .light:
-            if #available(iOS 13.0, *) {
-                let traits = UITraitCollection(userInterfaceStyle: .light)
-                return UIColor.label.resolvedColor(with: traits)
-            } else {
-                return UIColor.black
-            }
-        default:
-            if #available(iOS 13.0, *) {
-                let traits = UITraitCollection(userInterfaceStyle: .dark)
-                return UIColor.label.resolvedColor(with: traits)
-            } else {
-                return UIColor.white
-            }
-        }
+        return SunlightUITheme.accentColor()
     }
     
     @objc static var appPrimaryColor: UIColor {
-        return UIColor(
-            red: 0.0,
-            green: 0.48,
-            blue: 1.0,
-            alpha: 1.0
-        ) // #0A84FF
+        return SunlightUITheme.accentColor()
     }
     
     @objc static var appSecondaryColor: UIColor {
-        
-        let originalColor = appPrimaryColor
-        let grayColor = UIColor.gray
-        let mixRatio: CGFloat = 0.3
-        
-        var r1: CGFloat = 0
-        var g1: CGFloat = 0
-        var b1: CGFloat = 0
-        var a1: CGFloat = 0
-        
-        var r2: CGFloat = 0
-        var g2: CGFloat = 0
-        var b2: CGFloat = 0
-        var a2: CGFloat = 0
-        
-        originalColor.getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
-        grayColor.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        
-        let r = r1 * (1 - mixRatio) + r2 * mixRatio
-        let g = g1 * (1 - mixRatio) + g2 * mixRatio
-        let b = b1 * (1 - mixRatio) + b2 * mixRatio
-        let a = a1 * (1 - mixRatio) + a2 * mixRatio
-        
-        return UIColor(red: r, green: g, blue: b, alpha: a)
+        return SunlightUITheme.deepAccentColor()
     }
     
     @objc static var appPrimaryColorWithAlpha: UIColor {
-        return appPrimaryColor.withAlphaComponent(0.24)
+        return appPrimaryColor.withAlphaComponent(0.20)
     }
     
     @objc static var textTintColorWithAlpha: UIColor {
-        return appPrimaryColor.withAlphaComponent(0.24)
+        return appPrimaryColor.withAlphaComponent(0.20)
     }
     
     @objc static var textColorGray: UIColor {
-        return UIColor(
-            red: 0.55,
-            green: 0.55,
-            blue: 0.6,
-            alpha: 0.95
-        )
+        return SunlightUITheme.secondaryTextColor()
     }
     
     @objc static var lowProfileGray: UIColor {
-        return UIColor(
-            red: 0.65,
-            green: 0.65,
-            blue: 0.65,
-            alpha: 0.4
-        )
+        return SunlightUITheme.disabledTextColor()
     }
     
     @available(iOS 26.0, *)
     @objc static var liquidGlassSwitchOffTint: UIColor {
-        switch userInterfaceStyle() {
-        case .light:
-            return UIColor.systemFill
-        default:
-            return UIColor.clear
-        }
+        return SunlightUITheme.raisedColor()
     }
     
     @objc static var liquidGlassSliderMaxTrackTint: UIColor {
-        if #available(iOS 13.0, *) {
-            switch userInterfaceStyle() {
-            case .light:
-                return UIColor.tertiarySystemFill
-            default:
-                return UIColor.tertiarySystemFill
-            }
-        }
-        else {
-            return UIColor.black
-        }
+        return SunlightUITheme.borderColor()
     }
 }

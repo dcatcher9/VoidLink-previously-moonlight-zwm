@@ -20,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (id)initWithView:(StreamView*)view settings:(TemporarySettings*)settings profile:(OSCProfile* )profile;
 - (void)setAllowSingleTouchEnabled:(BOOL)enabled;
 
+- (void)cancelHostTouches;
+
 @end
 
 NS_ASSUME_NONNULL_END

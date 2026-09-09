@@ -38,8 +38,8 @@
     dispatch_queue_t _sq;
     dispatch_semaphore_t _frameSemaphore;
 
-    // The renderer session currently consuming from the queue. A stale session's
-    // async stop must not pause a newer session's queue.
+    // The renderer session using the queue. Stale callbacks and async stops
+    // must not enqueue into or pause a newer session's queue.
     __weak id _owner;
 }
 
@@ -98,7 +98,17 @@
 }
 
 // Push into buffer at _tail
-- (void)_pushFrame:(Frame *)frame {
+- (int)_pushFrame:(Frame *)frame {
+    int dropped = 0;
+    if (_count == _capacity) {
+        // IDRs may exceed the soft target, but never the allocated ring. These
+        // frames are already decoded, so discarding the oldest presentation
+        // frame does not break decode dependencies.
+        Frame *oldest = [self _popFrame];
+        [oldest setDurationFromNext:[self _peekFrame]];
+        [self _noteDroppedFrame:oldest];
+        dropped = 1;
+    }
     [_buffer replaceObjectAtIndex:_tail withObject:frame];
     _tail = (_tail + 1) % _capacity;
     _count++;
@@ -110,6 +120,7 @@
 	FQLog(LOG_I, @"[-> %@ %d / %f] enqueue frame, queue size %d / %d",
 		frame.frameType == FRAME_TYPE_IDR ? @"IDR" : @"P",
 		frame.frameNumber, frame.pts, _count, _highWaterMark);
+    return dropped;
 }
 
 // Pop oldest frame from _head
@@ -119,6 +130,10 @@
     [_buffer replaceObjectAtIndex:_head withObject:[NSNull null]];
     _head = (_head + 1) % _capacity;
     _count--;
+    // A consumer may dequeue without first waiting (the queue was nonempty).
+    // Consume any corresponding wake permit so a later empty interval cannot
+    // spin through signals accumulated during the entire streaming session.
+    dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_NOW);
     return frame;
 }
 
@@ -156,7 +171,7 @@
     int dropCount = 0;
     // Always accept IDR frames, allow exceeding HWM
     if (frame.frameType == FRAME_TYPE_IDR || _count < frameDropTarget) {
-        [self _pushFrame:frame];
+        dropCount += [self _pushFrame:frame];
         _droppedLast = NO;
     } else {
         if (!_droppedLast) {
@@ -172,7 +187,7 @@
                 [self _noteDroppedFrame:oldest];
                 dropCount = 1;
             }
-            [self _pushFrame:frame];
+            dropCount += [self _pushFrame:frame];
             _droppedLast = NO;
         }
     }
@@ -195,9 +210,17 @@
 }
 
 // enqueue that is a bit more flexixble, using the same 500ms queue size history method as moonlight-qt.
+- (int)enqueue:(Frame *)frame withSlackSize:(int)slack owner:(id)owner {
+    @synchronized (self) {
+        if (owner == nil || _owner != owner) return 1;
+        // Serialize the ownership check and insertion with start/stop. Keep the
+        // same monitor -> unfair lock order used by their clear operations.
+        return [self enqueue:frame withSlackSize:slack];
+    }
+}
+
 - (int)enqueue:(Frame *)frame withSlackSize:(int)slack {
     os_unfair_lock_lock(&_lock);
-    CFTimeInterval now = CACurrentMediaTime();
 
     // new data point for queue health
     [_queueSizeHistory addValue:(float)_count];
@@ -243,9 +266,29 @@
 
 // Allows the render loop to wait if the queue is empty
 - (void)waitForEnqueue {
-    while (!self.paused && [self isEmpty]) {
+    [self waitForEnqueueUntilCancelled:^BOOL{ return NO; }];
+}
+
+- (void)waitForEnqueueUntilCancelled:(BOOL (^)(void))isCancelled {
+    while (!isCancelled() && !self.paused && [self isEmpty]) {
         dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1f * NSEC_PER_SEC)); // 100ms
         dispatch_semaphore_wait(_frameSemaphore, timeout);
+    }
+}
+
+- (void)waitForActiveEnqueueUntilCancelled:(BOOL (^)(void))isCancelled {
+    while (!isCancelled() && (self.paused || [self isEmpty])) {
+        dispatch_semaphore_wait(_frameSemaphore, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10));
+    }
+}
+
+- (void)recordDroppedFrameForOwner:(id)owner {
+    @synchronized (self) {
+        if (owner == nil || _owner != owner || self.paused) return;
+        os_unfair_lock_lock(&_lock);
+        _framesIn++;
+        [_frameDropMetrics addValue:1];
+        os_unfair_lock_unlock(&_lock);
     }
 }
 
@@ -280,29 +323,48 @@
     });
 }
 
+- (void)dequeueWithTimeout:(CFTimeInterval)timeout
+                    owner:(id)owner
+               completion:(void (^)(Frame * _Nullable frame))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        Frame *frame = [self dequeueWithTimeoutSync:timeout owner:owner];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(frame);
+        });
+    });
+}
+
+- (Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout owner:(id)owner {
+    return [self dequeueWithTimeoutSync:timeout owner:owner untilCancelled:^BOOL{ return NO; }];
+}
+
 - (Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout {
-    CFTimeInterval start = CACurrentMediaTime();
-    CFTimeInterval deadline = start + timeout;
-    int round = 0;
+    return [self dequeueWithTimeoutSync:timeout untilCancelled:^BOOL{ return NO; }];
+}
 
-    if (self.paused) {
-        return nil;
+- (Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout untilCancelled:(BOOL (^)(void))isCancelled {
+    id owner;
+    @synchronized (self) { owner = _owner; }
+    return [self dequeueWithTimeoutSync:timeout owner:owner untilCancelled:isCancelled];
+}
+
+- (Frame *)dequeueWithTimeoutSync:(CFTimeInterval)timeout owner:(id)owner untilCancelled:(BOOL (^)(void))isCancelled {
+    CFTimeInterval deadline = CACurrentMediaTime() + (isfinite(timeout) ? MAX(timeout, 0) : 0);
+    // Try once for a zero timeout. Ownership, cancellation and pop share the
+    // start/stop monitor so an old waiting consumer cannot take a new frame.
+    for (;;) {
+        @synchronized (self) {
+            if (owner == nil || _owner != owner || self.paused || isCancelled()) return nil;
+            Frame *frame = [self dequeue];
+            if (frame) return frame;
+        }
+        CFTimeInterval remaining = deadline - CACurrentMediaTime();
+        if (remaining <= 0) return nil;
+        // Enqueue/stop wakes this wait; the bounded interval also observes
+        // renderer-only cancellation without a 100-microsecond polling loop.
+        dispatch_semaphore_wait(_frameSemaphore, dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(MIN(remaining, 0.1) * NSEC_PER_SEC)));
     }
-
-    // Always attempt to dequeue at least once
-    do {
-        if (round > 0) {
-            usleep(100); // 0.1ms
-        }
-        Frame *frame = [self dequeue];
-        if (frame) {
-            return frame;
-        }
-        round++;
-    } while (CACurrentMediaTime() < deadline);
-
-    FQLog(LOG_I, @"dequeueWithTimeout timed out after %.3f ms", (CACurrentMediaTime() - start) * 1000.0);
-    return nil;
 }
 
 - (NSUInteger)count {
@@ -324,6 +386,9 @@
         [_buffer replaceObjectAtIndex:i withObject:[NSNull null]];
     }
     _head = _tail = _count = 0;
+    // Clearing discards the associated notifications as well as their frames.
+    // Enqueue holds the same lock, so no newly published frame loses its wakeup.
+    while (dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_NOW) == 0) {}
     _droppedLast = NO;
     _ptsCorrection = CMTimeMake(0, 90000);
     _frameDropMetrics = [[FloatBuffer alloc] initWithCapacity:512];
@@ -369,24 +434,23 @@
             return;
         }
         _owner = nil;
+        // Keep ownership and its state transition together: a new start must
+        // not interleave before this stop pauses and clears the old session.
+        self.paused = YES;
+        [self clear];
+        dispatch_semaphore_signal(_frameSemaphore);
+        Log(LOG_I, @"FrameQueue stopped");
     }
-    // new frames will no longer be coming in, make sure consumer side is not left waiting
-    self.paused = YES;
-    Log(LOG_I, @"FrameQueue stopped");
-    dispatch_semaphore_signal(_frameSemaphore);
-    // Don't keep the previous session's frames (and their pixel buffers) alive
-    [self clear];
 }
 
 - (void)startForOwner:(id)owner {
     @synchronized (self) {
         _owner = owner;
+        // Drop frames from the previous format before exposing the new session.
+        [self clear];
+        self.paused = NO;
+        Log(LOG_I, @"FrameQueue started");
     }
-    // Drop any frames left over from a previous renderer session; feeding them to a
-    // renderer with a different backend or video format can crash it.
-    [self clear];
-    self.paused = NO;
-    Log(LOG_I, @"FrameQueue started");
 }
 
 // For use with NSLog("%@", franeQueue);

@@ -20,6 +20,12 @@
 
 @interface SettingsViewController : UIViewController <RearNavigationBarMenuDelegate, UITextFieldDelegate>
 
+// Set before loading the storyboard view. "all" shows the flat Global settings
+// page; a section identifier retains the isolated category presentation.
+// Only edited fields are saved; the enclosing navigation owns Done/dismissal.
+@property (nonatomic, copy, nullable) NSString *globalCategoryIdentifier;
+@property (nonatomic, copy, nullable) void (^globalCategorySaved)(void);
+
 @property (strong, nonatomic) IBOutlet UINavigationBar *navigationBar;
 @property (strong, nonatomic) UIStackView *parentStack;
 @property (strong, nonatomic) IBOutlet UIStackView *resolutionStack;

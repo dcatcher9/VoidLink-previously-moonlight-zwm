@@ -22,6 +22,7 @@
 #import <UIKit/UIKit.h>
 
 @class LayoutOnScreenControlsViewController;
+@class SunlightStreamQualityProfile;
 
 #if TARGET_OS_TV
 @import GameController;
@@ -33,6 +34,10 @@
 #endif
 @property (nonatomic, strong) StreamManager* streamMan;
 @property (nonatomic) StreamConfiguration* streamConfig;
+// Unapplied settings from other mode tabs survive this same-session reconnect.
+// Fresh launches do not supply them; Close and End session discard them.
+@property (nonatomic, copy) NSDictionary<NSNumber *, SunlightStreamQualityProfile *> *initialQualityDrafts;
+@property (nonatomic, copy) NSSet<NSNumber *> *initialQualityResetModes;
 @property (nonatomic, strong) AVPictureInPictureController *pipController API_AVAILABLE(ios(9.0));
 @property (nonatomic, strong) AVPictureInPictureControllerContentSource *pipContentSource API_AVAILABLE(ios(15.0)); // Needed for iOS 15+ layer-based PiP
 @property (nonatomic, weak) MainFrameViewController *mainFrameViewcontroller;
@@ -56,7 +61,6 @@
 - (void)updatePreferredDisplayMode:(BOOL)streamActive;
 - (void)setUserInteractionEnabledForStreamView:(bool)enabled;
 - (bool)shallDisableGyroHotSwitch;
-- (void)loadGameProfileConfigs:(OSCProfile* )profile;
 - (void)openWidgetProfileTableWithPickProfile:(BOOL)pickProfile;
 - (void)toggleGamepadOverlayWithOverlayEnabled:(BOOL)overlayEnabled API_AVAILABLE(ios(13.0));
 - (void)loadAbstractGamepadOverlayIfNeeded API_AVAILABLE(ios(13.0));

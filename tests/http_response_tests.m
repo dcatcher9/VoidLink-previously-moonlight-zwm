@@ -1,6 +1,11 @@
 #import "HttpResponse.h"
+#import "AppListResponse.h"
+#import "TemporaryApp.h"
+
+@implementation TemporaryApp @end
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static unsigned int assertions;
 
@@ -79,10 +84,53 @@ static void TestStatuses(void) {
     Check(response.statusCode == 500 && [response.statusMessage containsString:@"500"], @"Blank host error message has useful fallback");
 }
 
+static void TestAppListRefresh(void) {
+    AppListResponse *response = [AppListResponse new];
+    Check(!response.isStatusOk, @"New app list starts as an explicit failure");
+    NSString *valid = @"<root status_code=\"200\"><App><AppTitle>Desktop &amp; Tools</AppTitle><ID>123</ID><IsHdrSupported>1</IsHdrSupported><AppInstallPath>fixture</AppInstallPath></App></root>";
+    for (NSString *invalid in @[@"", @"<root", @"<root/>", @"<root status_code=\"200x\"/>",
+        @"<!DOCTYPE root [<!ENTITY name 'unsafe'>]><root status_code=\"200\"><App><ID>1</ID><AppTitle>&name;</AppTitle></App></root>"]) {
+        [response populateWithData:[valid dataUsingEncoding:NSUTF8StringEncoding]];
+        TemporaryApp *app = response.getAppList.anyObject;
+        Check(response.isStatusOk && response.getAppList.count == 1 && [app.id isEqual:@"123"] &&
+              [app.name isEqual:@"Desktop & Tools"] && app.hdrSupported && [app.installPath isEqual:@"fixture"],
+              @"Valid app list retains ID, decoded name, HDR and install-path metadata");
+        [response populateWithData:[invalid dataUsingEncoding:NSUTF8StringEncoding]];
+        Check(response.statusCode == 502 && response.getAppList.count == 0 && response.statusMessage.length > 0,
+              @"Malformed refresh clears apps and cannot reuse a previous successful status");
+    }
+    [response populateWithData:[@"<root status_code=\"401\" status_message=\"Pair again\"><App><ID>1</ID></App></root>" dataUsingEncoding:NSUTF8StringEncoding]];
+    Check(response.statusCode == 401 && [response.statusMessage isEqual:@"Pair again"] && response.getAppList.count == 0,
+          @"Failed app-list status preserves host error without exposing unusable entries");
+}
+
+static void TestPrivateDiagnostics(void) {
+    HttpResponse *response = [HttpResponse new];
+    FILE *capture = tmpfile();
+    Check(capture != NULL, @"Create isolated stderr capture");
+    int previous = dup(STDERR_FILENO);
+    Check(previous >= 0 && dup2(fileno(capture), STDERR_FILENO) >= 0, @"Capture parser diagnostics");
+    Populate(response, @"<root status_code=\"200\"><pairingsecret>private-pairing-sentinel</wrong></root>");
+    fflush(stderr);
+    Check(dup2(previous, STDERR_FILENO) >= 0, @"Restore stderr"); close(previous);
+    fseek(capture, 0, SEEK_END);
+    Check(ftell(capture) == 0, @"Malformed XML diagnostics never echo host response secrets");
+    fclose(capture);
+    Check(!response.isStatusOk, @"Suppressing diagnostics does not accept malformed XML");
+    for (NSString *xml in @[
+        @"<!DOCTYPE root [<!ENTITY secret 'private-pairing-sentinel'>]><root status_code=\"200\"><value>&secret;</value></root>",
+        @"<!DOCTYPE root SYSTEM 'https://fixture.invalid/private'><root status_code=\"200\"/>"]) {
+        Populate(response, xml);
+        Check(response.statusCode == 502 && [response getStringTag:@"value"] == nil, @"Reject unnecessary DTD/entity declarations before reading response fields");
+    }
+}
+
 int main(void) {
     @autoreleasepool {
         TestUInt64();
         TestStatuses();
+        TestPrivateDiagnostics();
+        TestAppListRefresh();
         printf("HttpResponse: %u assertions passed\n", assertions);
     }
     return 0;

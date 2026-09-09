@@ -12,6 +12,10 @@
 #import "DataManager.h"
 #import "TemporaryApp.h"
 #import "TemporarySettings.h"
+#import "SunlightNativeResolution.h"
+#import "SunlightStreamQualityProfile.h"
+
+NSNotificationName const SunlightExternalDisplayPreferenceChangedNotification = @"SunlightExternalDisplayPreferenceChanged";
 
 @implementation DataManager {
     NSManagedObjectContext *_managedObjectContext;
@@ -34,9 +38,60 @@
     
     _managedObjectContext = [[NSManagedObjectContext alloc] initWithConcurrencyType:NSMainQueueConcurrencyType];
     [_managedObjectContext setParentContext:[_appDelegate managedObjectContext]];
+
+#if !TARGET_OS_TV
+    [self adoptNativeResolutionDefaults];
+#endif
     
     return self;
 }
+
+#if !TARGET_OS_TV
+- (void)adoptNativeResolutionDefaults {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *migrationKey = @"sunlight.nativeResolutionDefaults.v1";
+    // DataManager is constructed during discovery and settings reads too. Once
+    // both migrations finish, avoid a second UIKit hop and private-store wait.
+    if ([defaults boolForKey:migrationKey] &&
+        ![SunlightStreamQualityProfile needsNativeResolutionMigrationInDefaults:defaults]) return;
+    NSManagedObjectContext *context = _appDelegate.managedObjectContext;
+    if (!context) return;
+    // The store context is private. Read UIKit before entering it so it never
+    // waits for main while a main-thread caller waits for the store operation.
+    __block CGSize native;
+    if (NSThread.isMainThread) native = SunlightNativeLandscapeSize();
+    else dispatch_sync(dispatch_get_main_queue(), ^{ native = SunlightNativeLandscapeSize(); });
+    if (native.width < 1 || native.height < 1) return;
+    [context performBlockAndWait:^{
+        if (![defaults boolForKey:migrationKey]) {
+            NSError *error = nil;
+            NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"Settings"];
+            request.fetchLimit = 1;
+            NSArray *records = [context executeFetchRequest:request error:&error];
+            if (!records) return;
+            // Fresh settings are initialized natively in retrieveSettings and
+            // saved by normal identity setup, which supplies required uniqueId.
+            // Do not create an incomplete persistent row just for migration.
+            if (records.count == 0) return;
+            Settings *settings = records.firstObject;
+            NSNumber *previousWidth = settings.width, *previousHeight = settings.height;
+            NSNumber *previousSelection = settings.resolutionSelected;
+            settings.width = @((int)native.width);
+            settings.height = @((int)native.height);
+            settings.resolutionSelected = @4; // Native, resolved again for each device.
+            if (![context save:&error]) {
+                settings.width = previousWidth; settings.height = previousHeight;
+                settings.resolutionSelected = previousSelection;
+                Log(LOG_E, @"Unable to save native resolution defaults: %@", error);
+                return;
+            }
+            [defaults setBool:YES forKey:migrationKey];
+        }
+        [SunlightStreamQualityProfile migrateLegacyPresetResolutionsToNativeWidth:(int)native.width
+            height:(int)native.height defaults:defaults];
+    }];
+}
+#endif
 
 - (void) updateUniqueId:(NSString*)uniqueId {
     [_managedObjectContext performBlockAndWait:^{
@@ -53,6 +108,56 @@
     }];
 
     return uid;
+}
+
+- (BOOL)updateExternalDisplayMode:(NSInteger)mode error:(NSError **)error {
+    if (mode < 0 || mode > 2) {
+        if (error) *error = [NSError errorWithDomain:@"SunlightSettings" code:1
+                                          userInfo:@{NSLocalizedDescriptionKey: @"Choose a valid output destination."}];
+        return NO;
+    }
+
+    // Write on the store-owning context so this operation does not save a stale
+    // sidebar child context or announce success before the disk save completes.
+    NSManagedObjectContext *context = _appDelegate.managedObjectContext;
+    if (!context) {
+        if (error) *error = [NSError errorWithDomain:@"SunlightSettings" code:2
+                                          userInfo:@{NSLocalizedDescriptionKey: @"Settings are not available yet."}];
+        return NO;
+    }
+    __block NSError *saveError = nil;
+    __block BOOL saved = NO;
+    __block BOOL changed = NO;
+    [context performBlockAndWait:^{
+        NSFetchRequest *request = [NSFetchRequest fetchRequestWithEntityName:@"Settings"];
+        request.fetchLimit = 1;
+        NSArray *records = [context executeFetchRequest:request error:&saveError];
+        if (!records) return;
+        BOOL inserted = records.count == 0;
+        Settings *settings = inserted ? [NSEntityDescription insertNewObjectForEntityForName:@"Settings" inManagedObjectContext:context] : records.firstObject;
+        NSNumber *previous = settings.externalDisplayMode;
+        changed = ![previous isEqualToNumber:@(mode)];
+        settings.externalDisplayMode = @(mode);
+        saved = !context.hasChanges || [context save:&saveError];
+        if (!saved) {
+            // Restore this field without discarding other pending settings.
+            if (inserted) [context deleteObject:settings];
+            else settings.externalDisplayMode = previous;
+        }
+    }];
+    if (!saved) {
+        if (error) *error = saveError;
+        return NO;
+    }
+    if (changed) {
+        dispatch_block_t notify = ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:SunlightExternalDisplayPreferenceChangedNotification
+                                                                object:self userInfo:@{@"externalDisplayMode": @(mode)}];
+        };
+        if (NSThread.isMainThread) notify();
+        else dispatch_async(dispatch_get_main_queue(), notify);
+    }
+    return YES;
 }
 
 - (void) saveSettings:(Settings*)settings
@@ -287,6 +392,13 @@
         // create a new settings object with the default values
         NSEntityDescription* entity = [NSEntityDescription entityForName:@"Settings" inManagedObjectContext:_managedObjectContext];
         Settings* settings = [[Settings alloc] initWithEntity:entity insertIntoManagedObjectContext:_managedObjectContext];
+#if !TARGET_OS_TV
+        CGSize native = SunlightNativeLandscapeSize();
+        if (native.width >= 1 && native.height >= 1) {
+            settings.width = @((int)native.width); settings.height = @((int)native.height);
+            settings.resolutionSelected = @4;
+        }
+#endif
         
         return settings;
     } else {

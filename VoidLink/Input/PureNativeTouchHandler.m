@@ -14,6 +14,7 @@
 #import "VoidLink-Swift.h"
 
 #include <Limelight.h>
+#import "SunlightInputDispatch.h"
 
 @implementation PureNativeTouchHandler {
     __weak StreamView* streamView;
@@ -39,9 +40,6 @@
 
     NSMutableDictionary *pointerObjDict;
 
-    CGFloat slideGestureVerticalThreshold;
-    CGFloat screenWidthWithThreshold;
-    CGFloat _edgeTolerance;
     
     CGRect streamViewBounds;
     
@@ -91,9 +89,6 @@
     
     self->pointerObjDict = [NSMutableDictionary dictionary];
     
-    _edgeTolerance = settings.edgeSlidingSensitivity.floatValue;
-    slideGestureVerticalThreshold = CGRectGetHeight([[UIScreen mainScreen] bounds]) * 0.4;
-    screenWidthWithThreshold = CGRectGetWidth([[UIScreen mainScreen] bounds]) - _edgeTolerance;
 
     self->pointerVelocityDividerLocationByPoints = self->streamView.bounds.size.width * profile.pointerVelocityModeDivider;
     
@@ -169,10 +164,6 @@
     [activePointerIds addObject:pointerIdObj];
     
     //check if touch point is spawned on the left or right upper half screen edges, event to remote PC. this is for better handling in-stream slide gesture
-    CGPoint initialPoint = [touch locationInView:self->streamView];
-    if(initialPoint.y < slideGestureVerticalThreshold && (initialPoint.x < _edgeTolerance || initialPoint.x > screenWidthWithThreshold)) {
-        [blacklistedTouches addObject:touchAddrObj];
-    }
 }
 
 // remove pointerId in touchesEnded or touchesCancelled
@@ -194,7 +185,6 @@
 
 
 - (void)sendTouchEvent:(UITouch*)touch withTouchtype:(uint8_t)touchType{
-    //if(touchPointSpawnedAtUpperScreenEdge && touchType != LI_TOUCH_EVENT_UP) return; //  we're done here. this touch event will not be sent to the remote PC. and this must be checked after coord selector finishes populating new relative coords, or the app will crash    
     if(!touch) return;
 
     if([blacklistedTouches containsObject:@((uintptr_t)touch)]) return;
@@ -213,13 +203,13 @@
 
     NativeTouchPointer *pointer = [self getPointerObjFromDict:touch];
     if(pointer != nil && pointer.needResetCoords){ // access whether the current pointer has reached the boundary, and need a coord reset.
-        LiSendTouchEvent(LI_TOUCH_EVENT_UP, pointerId, normalizedX, normalizedY, 0, 0, 0, 0);  //event must sent from the lowest level directy by LiSendTouchEvent to simulate continous dragging to another point on screen
-        LiSendTouchEvent(LI_TOUCH_EVENT_DOWN, pointerId, 0.3, 0.4, 0, 0, 0, 0);
-    }else LiSendTouchEvent(touchType, pointerId, normalizedX, normalizedY,(touch.force / touch.maximumPossibleForce) / sin(touch.altitudeAngle),0.0f, 0.0f,[self getRotationFromAzimuthAngle:[touch azimuthAngleInView:streamView]]);
+        SunlightHostInput(streamView, ^int{ return LiSendTouchEvent(LI_TOUCH_EVENT_UP, pointerId, normalizedX, normalizedY, 0, 0, 0, 0); });  //event must sent from the lowest level directy by LiSendTouchEvent to simulate continous dragging to another point on screen
+        SunlightHostInput(streamView, ^int{ return LiSendTouchEvent(LI_TOUCH_EVENT_DOWN, pointerId, 0.3, 0.4, 0, 0, 0, 0); });
+    }else SunlightHostInput(streamView, ^int{ return LiSendTouchEvent(touchType, pointerId, normalizedX, normalizedY,(touch.force / touch.maximumPossibleForce) / sin(touch.altitudeAngle),0.0f, 0.0f,[self getRotationFromAzimuthAngle:[touch azimuthAngleInView:streamView]]); });
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    SunlightDispatchHostInput(streamView, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         for (UITouch* touch in touches){
             // continue to the next loop if current touch is already captured by OSC. works only in regular native touch
             [self handleTouchDown:touch]; //generate & populate pointerId
@@ -228,7 +218,7 @@
         }
         
         if(self->trackPointEnabled){
-            dispatch_async(dispatch_get_main_queue(), ^{
+            SunlightDispatchHostInput(streamView, dispatch_get_main_queue(), ^{
                 [CATransaction begin];
                 [CATransaction setDisableActions:YES];
                 for (UITouch* touch in touches){
@@ -244,7 +234,7 @@
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, moveEventIntervalNSec), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    SunlightDispatchHostInputAfter(streamView, dispatch_time(DISPATCH_TIME_NOW, moveEventIntervalNSec), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         for (UITouch* touch in touches){
             if(self->activateCoordSelector) [self updatePointerObjInDict:touch];
             [self sendTouchEvent:touch withTouchtype:LI_TOUCH_EVENT_MOVE];
@@ -253,7 +243,7 @@
     });
     
     if(self->trackPointEnabled){
-        dispatch_async(dispatch_get_main_queue(), ^{
+        SunlightDispatchHostInput(streamView, dispatch_get_main_queue(), ^{
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             for (UITouch* touch in touches){
@@ -267,12 +257,12 @@
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, moveEventIntervalNSec), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    SunlightDispatchHostInputAfter(streamView, dispatch_time(DISPATCH_TIME_NOW, moveEventIntervalNSec), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         for (UITouch* touch in touches){
             [self sendTouchEvent:touch withTouchtype:LI_TOUCH_EVENT_UP]; //send touch event before remove pointerId
             
             if(self->trackPointEnabled){
-                dispatch_async(dispatch_get_main_queue(), ^{
+                SunlightDispatchHostInput(streamView, dispatch_get_main_queue(), ^{
                     uint8_t pointerId = [self retrievePointerIdFromDict:touch];
                     CAShapeLayer* trackPoint = self->trackPointPool[pointerId];
                     [CATransaction begin];
@@ -291,7 +281,7 @@
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
-    [self touchesEnded:touches withEvent:event];
+    [self cancelHostTouches];
 }
 
 
@@ -335,6 +325,17 @@
     }
     trackPointPool = nil;
     pointerObjDict = nil;
+}
+
+- (void)cancelHostTouches {
+    for (NSNumber *pointerId in activePointerIds) {
+        LiSendTouchEvent(LI_TOUCH_EVENT_CANCEL, pointerId.unsignedIntValue, 0, 0, 0, 0, 0, 0);
+    }
+    [activePointerIds removeAllObjects];
+    [pointerIdDict removeAllObjects];
+    [pointerObjDict removeAllObjects];
+    [blacklistedTouches removeAllObjects];
+    for (CAShapeLayer *point in trackPointPool) point.hidden = YES;
 }
 
 @end

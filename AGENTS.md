@@ -21,3 +21,14 @@ directly without asking the user to copy Xcode's console. Preserve the capture
 path for follow-up diagnostics, and redact session keys and pairing secrets from
 captured/shared output. Do not restart a running app merely to answer a question;
 restart when the user requests it or as part of an authorized build-and-test run.
+
+# Shared-core feature preservation
+
+Updates to the shared `dcatcher9/moonlight-common-c` must preserve
+microphone forwarding and authored DualSense haptics, as explicitly requested
+by the user. Do not remove or disable those features merely to make the shared
+revision compile. Keep shared-core/host feature consolidation on the other
+machine; see `docs/shared-common-core-ios-handoff.md` for the negotiated API and
+capability requirements. iOS now consumes the same published core revision as
+Android, with a clean submodule. The temporary four-file compatibility backport
+is retired; do not reintroduce it or make local protocol patches in the submodule.

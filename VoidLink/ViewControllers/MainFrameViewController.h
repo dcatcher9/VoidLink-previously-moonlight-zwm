@@ -20,12 +20,14 @@
 @class SettingsViewController;
 @class TemporaryApp;
 @class HostCollectionViewController;
+@class StreamFrameViewController;
+@class SunlightStreamQualityProfile;
 
 @interface MainFrameViewController : UICollectionViewController <DiscoveryCallback, PairCallback, AppAssetCallback, NSURLConnectionDelegate, SWRevealViewControllerDelegate, UITextFieldDelegate>
 
 
 @property (nonatomic, strong) IBOutlet UIBarButtonItem *settingsButton;
-@property (weak, nonatomic) IBOutlet UIBarButtonItem *profilesButton;
+@property (strong, nonatomic) IBOutlet UIBarButtonItem *profilesButton;
 @property (weak, nonatomic) SettingsViewController *settingsViewController;
 @property (nonatomic, strong) HostCollectionViewController *hostCollectionVC;
 @property (nonatomic, strong, readonly) NSArray<TemporaryApp *> *sortedAppList;
@@ -44,8 +46,12 @@
 - (bool)isStreaming;
 - (TemporaryApp*)findRunningApp:(TemporaryHost*)host;
 - (void)quitApp:(TemporaryApp* )app;
-- (void)quitLaunchedApp;
+- (void)disconnectAndQuitStreamFromController:(StreamFrameViewController *)controller;
 - (void)launchApp:(TemporaryApp *)app;
+- (BOOL)reconnectStreamFromController:(StreamFrameViewController *)controller
+                               mode:(SunlightStreamMode)mode
+             remainingQualityDrafts:(NSDictionary<NSNumber *, SunlightStreamQualityProfile *> *)drafts
+             remainingQualityResets:(NSSet<NSNumber *> *)resets;
 - (void)quitRunningAppAndStart:(TemporaryApp *)app;
 
 - (NSInteger)requestForBitrate:(NSInteger)bitrateKbps;

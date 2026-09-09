@@ -11,6 +11,7 @@
 #import "VoidLink-Swift.h"
 
 #include <Limelight.h>
+#import "SunlightInputDispatch.h"
 
 
 static const float QUICK_TAP_TIME_INTERVAL = 0.2;
@@ -25,11 +26,6 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
     BOOL mousePointerMoved;
     BOOL quickTapDetected;
     
-    // upper screen edge check
-    bool touchPointSpawnedAtUpperScreenEdge;
-    CGFloat slideGestureVerticalThreshold;
-    CGFloat screenWidthWithThreshold;
-    CGFloat _edgeTolerance;
 
     UITouch* touchLockedForMouseMove;
     UITouch* quickTapTouch;
@@ -57,6 +53,8 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
     _mouseRightClickTapRecognizer.tapDownTimeThreshold = RIGHTCLICK_TAP_DOWN_TIME_THRESHOLD_S; // tap down time in seconds.
     _mouseRightClickTapRecognizer.delaysTouchesBegan = NO;
     _mouseRightClickTapRecognizer.delaysTouchesEnded = NO;
+    // Two-finger recognition must not cancel its own queued right click.
+    _mouseRightClickTapRecognizer.cancelsTouchesInView = NO;
     [self->streamView.streamFrameTopLayerView addGestureRecognizer:_mouseRightClickTapRecognizer]; // add all additional gestures to the streamFrameTopLayerView instead of the streamview.
     _mouseRightClickTapRecognizer.touchCapturingView = streamView;
     
@@ -64,11 +62,6 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
     mousePointerMoved = false;
     mousePointerTimestamp = 0;
     
-    // upper screen check
-    _edgeTolerance = settings.edgeSlidingSensitivity.floatValue;
-    slideGestureVerticalThreshold = CGRectGetHeight([[UIScreen mainScreen] bounds]) * 0.4;
-    screenWidthWithThreshold = CGRectGetWidth([[UIScreen mainScreen] bounds]) - _edgeTolerance;
-    self->touchPointSpawnedAtUpperScreenEdge = false;
     
     // self->displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(displayLinkCallback:)];
     // [self->displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
@@ -95,14 +88,14 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 }
 
 - (void)mouseRightClick {
-    multiTouchesDetected = false;
+    if (!streamView.hostTouchInputAllowed) return;
     dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC));
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+    SunlightDispatchHostInput(streamView, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT); });
         Log(LOG_D, @"Sending right mouse button press");
         // Wait 100 ms to simulate a real button press
-        dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+        SunlightDispatchHostInputAfter(streamView, delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT); });
         });
     });
 }
@@ -125,15 +118,6 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
     firstTouchMoved = false;
     
-    //check if touch point is spawned on the left or right upper half screen edges, this is the highest priority
-    CGPoint initialPoint = [[touches anyObject] locationInView:streamView];
-    if(initialPoint.y < slideGestureVerticalThreshold && (initialPoint.x < _edgeTolerance || initialPoint.x > screenWidthWithThreshold)) {
-        self->touchPointSpawnedAtUpperScreenEdge = true;
-        return;
-    }
-    
-    touchPointSpawnedAtUpperScreenEdge = false; // reset this flag immediately if we get a touch event passing the check above, this fixes irresponsive touch after closing the command tool menu.
-     
     if([UITouchUtil touchesIn:streamView from:event].count>=2){
         multiTouchesDetected = true;
         return;
@@ -192,7 +176,7 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
     
-    if(TouchPadGestureHandler.ctrlDown) LiSendKeyboardEvent(CommandManager.keyboardButtonMappings[@"CTRL"].shortValue,KEY_ACTION_UP,0);
+    if(TouchPadGestureHandler.ctrlDown) SunlightHostInput(streamView, ^int{ return LiSendKeyboardEvent(CommandManager.keyboardButtonMappings[@"CTRL"].shortValue,KEY_ACTION_UP,0); });
     
     [TouchPadGestureHandler startInertialScroll];
     
@@ -211,7 +195,7 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
         // dealing with a second quick tap following the first tap:
         if(self->quickTapDetected){
             // we're in at least the second tap release of the very short time interval after the first tap.
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); // must release the button anyway, because the button is likely being held down since the long click turned into a dragging event.
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); }); // must release the button anyway, because the button is likely being held down since the long click turned into a dragging event.
             if(!mousePointerMoved) [self sendShortMouseLeftButtonClickEvent]; // if it is a quick tap and the pointer was not moved, we must send another click to simulate double click.
             self->quickTapDetected = false; // reset flag
         }
@@ -228,11 +212,10 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
         mousePointerMoved = false; // need to reset this anyway
     }
         
-    touchPointSpawnedAtUpperScreenEdge = false;
 }
 
 - (void)sendMouseMoveEvent:(CGPoint)currentLocation{
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    SunlightDispatchHostInput(streamView, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         bool isAdjacentPoints = [self isAdjacentPoints:self->initialMousePointerLocation from:currentLocation tolerance:self->currentSettings.relativeTouchSlideThreshold.floatValue];
     
         if (!self->firstTouchMoved && !isAdjacentPoints) {
@@ -248,8 +231,7 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
             
             if (deltaX != 0 || deltaY != 0) {
                 self->latestMousePointerLocation = currentLocation;
-                if(self->touchPointSpawnedAtUpperScreenEdge) return; // we're done here. this touch event will not be sent to the remote PC.
-                if(self->firstTouchMoved) LiSendMouseMoveEvent(deltaX, deltaY);
+                if(self->firstTouchMoved) SunlightHostInput(streamView, ^int{ return LiSendMouseMoveEvent(deltaX, deltaY); });
             }
         }
     });
@@ -257,16 +239,16 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 
 // this will turn into a dragging anytime...
 - (void)sendLongMouseLeftButtonClickEvent{
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    SunlightDispatchHostInput(streamView, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         // if (!self->isDragging){
         Log(LOG_D, @"Sending left mouse button press");
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); });
         
         // Wait 100 ms to simulate a real button press
         dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(QUICK_TAP_TIME_INTERVAL * NSEC_PER_SEC));
-        dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        SunlightDispatchHostInputAfter(streamView, delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             if(!self->quickTapDetected){
-                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+                SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
             }
             // else NSLog(@"Left mouse button release cancelled, keep pressing down, turning into dragging...");
         });
@@ -276,10 +258,10 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 
 - (void)sendShortMouseLeftButtonClickEvent{
     dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC));
-    dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
-        dispatch_after(delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+    SunlightDispatchHostInputAfter(streamView, delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); });
+        SunlightDispatchHostInputAfter(streamView, delay, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
         });
     });
 }
@@ -288,26 +270,48 @@ static const float QUICK_TAP_TIME_INTERVAL = 0.2;
 
 #if TARGET_OS_TV
 - (void)remoteButtonPressed:(id)sender {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    SunlightDispatchHostInput(streamView, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         Log(LOG_D, @"Sending left mouse button press");
         
         // Mark this as touchMoved to avoid a duplicate press on touch up
         self->touchMoved = true;
         
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); });
         
         // Wait 100 ms to simulate a real button press
         usleep(100 * 1000);
             
-        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT); });
     });
 }
 - (void)remoteButtonLongPressed:(id)sender {
     Log(LOG_D, @"Holding left mouse button");
     
     isDragging = true;
-    LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+    SunlightHostInput(streamView, ^int{ return LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT); });
 }
 #endif
+
+- (void)cancelHostTouches {
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+    touchLockedForMouseMove = nil;
+    quickTapTouch = nil;
+    firstTouchMoved = false;
+    mousePointerMoved = false;
+    quickTapDetected = false;
+    multiTouchesDetected = false;
+    mousePointerTimestamp = 0;
+    _mouseRightClickTapRecognizer.enabled = NO;
+    _mouseRightClickTapRecognizer.enabled = YES;
+}
+
+- (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event {
+    [self cancelHostTouches];
+}
+
+- (void)dealloc {
+    [streamView.streamFrameTopLayerView removeGestureRecognizer:_mouseRightClickTapRecognizer];
+}
 
 @end

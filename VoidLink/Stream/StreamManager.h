@@ -19,6 +19,9 @@
 - (id) initWithConfig:(StreamConfiguration*)config renderView:(UIView*)view connectionCallbacks:(id<ConnectionCallbacks>)callback;
 
 - (void) stopStream;
+// Always invokes completion asynchronously on main after the published engine
+// and decoder finish cleanup. Cancelled startup cannot publish another engine.
+- (void)stopStreamWithCompletion:(dispatch_block_t)completion;
 - (void) setNeedRequeuing:(bool)needRequeuing;
 
 - (NSString*) getStatsOverlayText: (uint16_t) overlayLevel;

@@ -10,12 +10,14 @@
 //
 
 #import "HapticContext.h"
-#import "DataManager.h"
 
 @import CoreHaptics;
 @import GameController;
 
+static char HapticQueueKey;
+
 @implementation HapticContext {
+    dispatch_queue_t _hapticQueue;
     GCControllerPlayerIndex _playerIndex;
     CHHapticEngine* _hapticEngine API_AVAILABLE(ios(13.0), tvos(14.0));
     id<CHHapticPatternPlayer> _motorHapticPlayer API_AVAILABLE(ios(13.0), tvos(14.0));
@@ -24,23 +26,47 @@
     BOOL _authoredPlaying;
 }
 
--(void)cleanup API_AVAILABLE(ios(14.0), tvos(14.0)) {
-    if (_motorHapticPlayer != nil) {
-        [_motorHapticPlayer cancelAndReturnError:nil];
-        _motorHapticPlayer = nil;
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _hapticQueue = dispatch_queue_create("sunlight.controller-haptics", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(_hapticQueue, &HapticQueueKey, (__bridge void *)self, NULL);
     }
-    if (_authoredHapticPlayer != nil) {
-        [_authoredHapticPlayer cancelAndReturnError:nil];
-        _authoredHapticPlayer = nil;
-    }
-    if (_hapticEngine != nil) {
-        [_hapticEngine stopWithCompletionHandler:nil];
-        _hapticEngine = nil;
-    }
+    return self;
 }
 
--(void)setMotorAmplitude:(unsigned short)amplitude API_AVAILABLE(ios(14.0), tvos(14.0)) {
-    NSError* error;
+-(void)cleanup API_AVAILABLE(ios(14.0), tvos(14.0)) {
+    // CoreHaptics callbacks enqueue instead of waiting for this queue, so
+    // cleanup can drain admitted effects without a callback/stop deadlock.
+    dispatch_block_t cleanup = ^{
+        CHHapticEngine *engine = self->_hapticEngine;
+        self->_hapticEngine = nil;
+        engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; };
+        engine.resetHandler = ^{};
+        [self->_motorHapticPlayer cancelAndReturnError:nil];
+        [self->_authoredHapticPlayer cancelAndReturnError:nil];
+        self->_motorHapticPlayer = nil;
+        self->_authoredHapticPlayer = nil;
+        self->_motorPlaying = NO;
+        self->_authoredPlaying = NO;
+        [engine stopWithCompletionHandler:nil];
+    };
+    if (dispatch_get_specific(&HapticQueueKey) == (__bridge void *)self) cleanup();
+    else dispatch_sync(_hapticQueue, cleanup);
+}
+
+- (void)setMotorAmplitude:(unsigned short)amplitude API_AVAILABLE(ios(14.0), tvos(14.0)) {
+    dispatch_async(_hapticQueue, ^{ [self applyMotorAmplitude:amplitude]; });
+}
+
+- (void)setAuthoredAmplitude:(float)amplitude sharpness:(float)sharpness transientStrength:(float)transientStrength API_AVAILABLE(ios(14.0), tvos(14.0)) {
+    dispatch_async(_hapticQueue, ^{
+        [self applyAuthoredAmplitude:amplitude sharpness:sharpness transientStrength:transientStrength];
+    });
+}
+
+-(void)applyMotorAmplitude:(unsigned short)amplitude API_AVAILABLE(ios(14.0), tvos(14.0)) {
+    NSError* error = nil;
 
     // Check if the haptic engine died
     if (_hapticEngine == nil) {
@@ -93,7 +119,7 @@
     }
 }
 
--(void)setAuthoredAmplitude:(float)amplitude
+-(void)applyAuthoredAmplitude:(float)amplitude
                   sharpness:(float)sharpness
           transientStrength:(float)transientStrength API_AVAILABLE(ios(14.0), tvos(14.0)) {
     if (_hapticEngine == nil) {
@@ -181,6 +207,8 @@
 }
 
 -(id) initDeviceEngineContextWithGamepad:(GCController*)gamepad API_AVAILABLE(ios(13.0), tvos(13.0)) {
+    self = [self init];
+    if (!self) return nil;
     NSError *error = nil;
     _hapticEngine = [[CHHapticEngine alloc] initAndReturnError:&error];
     if (error != nil) {
@@ -195,38 +223,14 @@
         return nil;
     }
 
-    __weak typeof(self) weakSelf = self;
-    _hapticEngine.stoppedHandler = ^(CHHapticEngineStoppedReason stoppedReason) {
-        HapticContext* me = weakSelf;
-        if (me == nil) {
-            return;
-        }
-        
-        Log(LOG_W, @"Controller %d: Haptic engine stopped: %p", me->_playerIndex, stoppedReason);
-        me->_motorHapticPlayer = nil;
-        me->_authoredHapticPlayer = nil;
-        me->_hapticEngine = nil;
-        me->_motorPlaying = NO;
-        me->_authoredPlaying = NO;
-    };
-    _hapticEngine.resetHandler = ^{
-        HapticContext* me = weakSelf;
-        if (me == nil) {
-            return;
-        }
-        
-        Log(LOG_W, @"Controller %d: Haptic engine reset", me->_playerIndex);
-        me->_motorHapticPlayer = nil;
-        me->_authoredHapticPlayer = nil;
-        me->_motorPlaying = NO;
-        me->_authoredPlaying = NO;
-        [me->_hapticEngine startAndReturnError:nil];
-    };
-    
+    [self installEngineCallbacks];
+
     return self;
 }
 
 -(id) initWithGamepad:(GCController*)gamepad locality:(GCHapticsLocality)locality API_AVAILABLE(ios(14.0), tvos(14.0)) {
+    self = [self init];
+    if (!self) return nil;
     bool fallBackToPhoneHaptics = false;
     
     if (gamepad.haptics == nil) {
@@ -253,42 +257,47 @@
     
     _playerIndex = gamepad.playerIndex;
     
-    NSError* error;
+    NSError* error = nil;
     [_hapticEngine startAndReturnError:&error];
     if (error != nil) {
         Log(LOG_W, @"Controller %d: Haptic engine failed to start: %@", gamepad.playerIndex, error);
         return nil;
     }
     
+    [self installEngineCallbacks];
+
+    return self;
+}
+
+- (void)installEngineCallbacks {
     __weak typeof(self) weakSelf = self;
-    _hapticEngine.stoppedHandler = ^(CHHapticEngineStoppedReason stoppedReason) {
-        HapticContext* me = weakSelf;
-        if (me == nil) {
-            return;
-        }
-        
-        Log(LOG_W, @"Controller %d: Haptic engine stopped: %p", me->_playerIndex, stoppedReason);
-        me->_motorHapticPlayer = nil;
-        me->_authoredHapticPlayer = nil;
-        me->_hapticEngine = nil;
-        me->_motorPlaying = NO;
-        me->_authoredPlaying = NO;
+    _hapticEngine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
+        HapticContext *context = weakSelf;
+        if (!context) return;
+        dispatch_async(context->_hapticQueue, ^{
+            if (!context->_hapticEngine) return;
+            Log(LOG_W, @"Controller %ld: Haptic engine stopped: %ld", (long)context->_playerIndex, (long)reason);
+            context->_motorHapticPlayer = nil;
+            context->_authoredHapticPlayer = nil;
+            context->_hapticEngine = nil;
+            context->_motorPlaying = NO;
+            context->_authoredPlaying = NO;
+        });
     };
     _hapticEngine.resetHandler = ^{
-        HapticContext* me = weakSelf;
-        if (me == nil) {
-            return;
-        }
-        
-        Log(LOG_W, @"Controller %d: Haptic engine reset", me->_playerIndex);
-        me->_motorHapticPlayer = nil;
-        me->_authoredHapticPlayer = nil;
-        me->_motorPlaying = NO;
-        me->_authoredPlaying = NO;
-        [me->_hapticEngine startAndReturnError:nil];
+        HapticContext *context = weakSelf;
+        if (!context) return;
+        dispatch_async(context->_hapticQueue, ^{
+            // Cleanup may have run after CoreHaptics queued this callback.
+            if (!context->_hapticEngine) return;
+            Log(LOG_W, @"Controller %ld: Haptic engine reset", (long)context->_playerIndex);
+            context->_motorHapticPlayer = nil;
+            context->_authoredHapticPlayer = nil;
+            context->_motorPlaying = NO;
+            context->_authoredPlaying = NO;
+            [context->_hapticEngine startAndReturnError:nil];
+        });
     };
-    
-    return self;
 }
 
 +(HapticContext*) createContextForHighFreqMotor:(GCController*)gamepad {

@@ -13,10 +13,10 @@
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/evp.h>
+#include <limits.h>
 
 @implementation CryptoManager
-static const int SHA1_HASH_LENGTH = 20;
-static const int SHA256_HASH_LENGTH = 32;
+enum { SHA1_HASH_LENGTH = 20, SHA256_HASH_LENGTH = 32 };
 static NSData* key = nil;
 static NSData* cert = nil;
 static NSData* p12 = nil;
@@ -43,130 +43,88 @@ static NSData* p12 = nil;
     return bytes;
 }
 
-- (NSData*) aesEncrypt:(NSData*)data withKey:(NSData*)key {
-    EVP_CIPHER_CTX* cipher;
-    int ciphertextLen;
+// Host-provided PEM and challenge bytes are untrusted until pairing finishes.
+// Reject malformed input before calling OpenSSL or slicing a response.
+static X509 *ReadCertificate(NSData *bytes) {
+    if (bytes.length == 0 || bytes.length > INT_MAX) return NULL;
+    BIO *bio = BIO_new_mem_buf(bytes.bytes, (int)bytes.length);
+    if (!bio) return NULL;
+    X509 *certificate = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    return certificate;
+}
 
-    cipher = EVP_CIPHER_CTX_new();
-
-    EVP_EncryptInit(cipher, EVP_aes_128_ecb(), [key bytes], NULL);
-    EVP_CIPHER_CTX_set_padding(cipher, 0);
-
-    NSMutableData* ciphertext = [NSMutableData dataWithLength:[data length]];
-    EVP_EncryptUpdate(cipher,
-                      [ciphertext mutableBytes],
-                      &ciphertextLen,
-                      [data bytes],
-                      (int)[data length]);
-    assert(ciphertextLen == [ciphertext length]);
-
+static NSData *CryptAES(NSData *data, NSData *keyBytes, BOOL encrypt) {
+    if (!data || keyBytes.length != 16 || data.length > INT_MAX - EVP_MAX_BLOCK_LENGTH || data.length % 16 != 0) return nil;
+    EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
+    if (!cipher) return nil;
+    NSMutableData *output = [NSMutableData dataWithLength:data.length + EVP_MAX_BLOCK_LENGTH];
+    int written = 0, finalBytes = 0;
+    BOOL okay = EVP_CipherInit_ex(cipher, EVP_aes_128_ecb(), NULL, keyBytes.bytes, NULL, encrypt) == 1 &&
+        EVP_CIPHER_CTX_set_padding(cipher, 0) == 1 &&
+        EVP_CipherUpdate(cipher, output.mutableBytes, &written, data.bytes, (int)data.length) == 1 &&
+        EVP_CipherFinal_ex(cipher, (unsigned char *)output.mutableBytes + written, &finalBytes) == 1 &&
+        (NSUInteger)(written + finalBytes) == data.length;
     EVP_CIPHER_CTX_free(cipher);
-    
-    return ciphertext;
+    if (!okay) return nil;
+    output.length = (NSUInteger)(written + finalBytes);
+    return output;
+}
+
+- (NSData*) aesEncrypt:(NSData*)data withKey:(NSData*)key {
+    return CryptAES(data, key, YES);
 }
 
 - (NSData*) aesDecrypt:(NSData*)data withKey:(NSData*)key {
-    EVP_CIPHER_CTX* cipher;
-    int plaintextLen;
-
-    cipher = EVP_CIPHER_CTX_new();
-
-    EVP_DecryptInit(cipher, EVP_aes_128_ecb(), [key bytes], NULL);
-    EVP_CIPHER_CTX_set_padding(cipher, 0);
-
-    NSMutableData* plaintext = [NSMutableData dataWithLength:[data length]];
-    EVP_DecryptUpdate(cipher,
-                      [plaintext mutableBytes],
-                      &plaintextLen,
-                      [data bytes],
-                      (int)[data length]);
-    assert(plaintextLen == [plaintext length]);
-
-    EVP_CIPHER_CTX_free(cipher);
-    
-    return plaintext;
+    return CryptAES(data, key, NO);
 }
 
 + (NSData*) pemToDer:(NSData*)pemCertBytes {
-    X509* x509;
-    
-    BIO* bio = BIO_new_mem_buf([pemCertBytes bytes], (int)[pemCertBytes length]);
-    x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-    BIO_free(bio);
-    
-    bio = BIO_new(BIO_s_mem());
-    i2d_X509_bio(bio, x509);
-    X509_free(x509);
-
-    BUF_MEM* mem;
-    BIO_get_mem_ptr(bio, &mem);
-    
-    NSData* ret = [[NSData alloc] initWithBytes:mem->data length:mem->length];
-    BIO_free(bio);
-    
-    return ret;
+    X509 *certificate = ReadCertificate(pemCertBytes);
+    if (!certificate) return nil;
+    unsigned char *encoded = NULL;
+    int length = i2d_X509(certificate, &encoded);
+    NSData *result = length > 0 ? [NSData dataWithBytes:encoded length:(NSUInteger)length] : nil;
+    OPENSSL_free(encoded);
+    X509_free(certificate);
+    return result;
 }
 
 - (bool) verifySignature:(NSData *)data withSignature:(NSData*)signature andCert:(NSData*)cert {
-    X509* x509;
-    BIO* bio = BIO_new_mem_buf([cert bytes], (int)[cert length]);
-    x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-    
-    BIO_free(bio);
-    
-    if (!x509) {
-        Log(LOG_E, @"Unable to parse certificate in memory");
-        return NULL;
-    }
-    
-    EVP_PKEY* pubKey = X509_get_pubkey(x509);
-    EVP_MD_CTX *mdctx = NULL;
-    mdctx = EVP_MD_CTX_create();
-    EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pubKey);
-    EVP_DigestVerifyUpdate(mdctx, [data bytes], [data length]);
-    int result = EVP_DigestVerifyFinal(mdctx, (unsigned char*)[signature bytes], [signature length]);
-    
-    X509_free(x509);
-    EVP_PKEY_free(pubKey);
-    EVP_MD_CTX_destroy(mdctx);
-    
-    return result > 0;
+    if (!data || signature.length == 0) return false;
+    X509 *certificate = ReadCertificate(cert);
+    if (!certificate) return false;
+    EVP_PKEY *publicKey = X509_get_pubkey(certificate);
+    EVP_MD_CTX *context = EVP_MD_CTX_new();
+    BOOL valid = publicKey && context &&
+        EVP_DigestVerifyInit(context, NULL, EVP_sha256(), NULL, publicKey) == 1 &&
+        EVP_DigestVerifyUpdate(context, data.bytes, data.length) == 1 &&
+        EVP_DigestVerifyFinal(context, signature.bytes, signature.length) == 1;
+    EVP_MD_CTX_free(context);
+    EVP_PKEY_free(publicKey);
+    X509_free(certificate);
+    return valid;
 }
 
 - (NSData *)signData:(NSData *)data withKey:(NSData *)key {
-    BIO* bio = BIO_new_mem_buf([key bytes], (int)[key length]);
-    
-    EVP_PKEY* pkey;
-    pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
-    
+    if (!data || key.length == 0 || key.length > INT_MAX) return nil;
+    BIO *bio = BIO_new_mem_buf(key.bytes, (int)key.length);
+    if (!bio) return nil;
+    EVP_PKEY *privateKey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
     BIO_free(bio);
-    
-    if (!pkey) {
-        Log(LOG_E, @"Unable to parse private key in memory!");
-        return NULL;
-    }
-    
-    EVP_MD_CTX *mdctx = NULL;
-    mdctx = EVP_MD_CTX_create();
-    EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, pkey);
-    EVP_DigestSignUpdate(mdctx, [data bytes], [data length]);
-    size_t slen;
-    EVP_DigestSignFinal(mdctx, NULL, &slen);
-    unsigned char* signature = malloc(slen);
-    int result = EVP_DigestSignFinal(mdctx, signature, &slen);
-    
-    EVP_PKEY_free(pkey);
-    EVP_MD_CTX_destroy(mdctx);
-    
-    if (result <= 0) {
-        free(signature);
-        return NULL;
-    }
-    
-    NSData* signedData = [NSData dataWithBytes:signature length:slen];
-    free(signature);
-    
-    return signedData;
+    if (!privateKey) return nil;
+    EVP_MD_CTX *context = EVP_MD_CTX_new();
+    size_t length = 0;
+    BOOL okay = context && EVP_DigestSignInit(context, NULL, EVP_sha256(), NULL, privateKey) == 1 &&
+        EVP_DigestSignUpdate(context, data.bytes, data.length) == 1 &&
+        EVP_DigestSignFinal(context, NULL, &length) == 1 && length > 0;
+    NSMutableData *signature = okay ? [NSMutableData dataWithLength:length] : nil;
+    if (okay) okay = EVP_DigestSignFinal(context, signature.mutableBytes, &length) == 1;
+    EVP_MD_CTX_free(context);
+    EVP_PKEY_free(privateKey);
+    if (!okay) return nil;
+    signature.length = length;
+    return signature;
 }
 
 + (NSData*) readCryptoObject:(NSString*)item {
@@ -221,30 +179,14 @@ static NSData* p12 = nil;
 }
 
 + (NSData *)getSignatureFromCert:(NSData *)cert {
-    BIO* bio = BIO_new_mem_buf([cert bytes], (int)[cert length]);
-    X509* x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-    BIO_free(bio);
-    
-    if (!x509) {
-        Log(LOG_E, @"Unable to parse certificate in memory!");
-        return NULL;
-    }
-    
-#if (OPENSSL_VERSION_NUMBER < 0x10002000L)
-    ASN1_BIT_STRING *asnSignature = x509->signature;
-#elif (OPENSSL_VERSION_NUMBER < 0x10100000L)
-    ASN1_BIT_STRING *asnSignature;
-    X509_get0_signature(&asnSignature, NULL, x509);
-#else
-    const ASN1_BIT_STRING *asnSignature;
-    X509_get0_signature(&asnSignature, NULL, x509);
-#endif
-    
-    NSData* sig = [NSData dataWithBytes:asnSignature->data length:asnSignature->length];
-    
-    X509_free(x509);
-    
-    return sig;
+    X509 *certificate = ReadCertificate(cert);
+    if (!certificate) return nil;
+    const ASN1_BIT_STRING *signature = NULL;
+    X509_get0_signature(&signature, NULL, certificate);
+    NSData *result = signature && signature->length > 0
+        ? [NSData dataWithBytes:signature->data length:(NSUInteger)signature->length] : nil;
+    X509_free(certificate);
+    return result;
 }
 
 + (NSData*)getKeyFromCertKeyPair:(CertKeyPair*)certKeyPair {

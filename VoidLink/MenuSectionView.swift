@@ -32,6 +32,8 @@ class MenuSectionView: UIView {
         }
     }
     var identifier: String?
+    // Expanded standalone forms need a concrete width to measure multiline text.
+    var usesAvailableWidthForSizing = false
     var isExpanded = true
     var expandable = true
     var lockedSectionHandler: (() -> Void)?
@@ -338,7 +340,16 @@ class MenuSectionView: UIView {
         if isExpanded {
             rootStackView.isHidden = false
             separatorLine.isHidden = false
-            var fittingSize = rootStackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            var fittingSize: CGSize
+            if usesAvailableWidthForSizing, rootStackView.bounds.width > 0 {
+                fittingSize = rootStackView.systemLayoutSizeFitting(
+                    CGSize(width: rootStackView.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+                    withHorizontalFittingPriority: .required,
+                    verticalFittingPriority: .fittingSizeLevel
+                )
+            } else {
+                fittingSize = rootStackView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            }
             let rootStackViewHeight = fittingSize.height
             fittingSize = headerView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
             let headerHeight = fittingSize.height

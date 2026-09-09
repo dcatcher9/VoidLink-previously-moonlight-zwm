@@ -24,6 +24,10 @@
 
 @interface ControllerSupport : NSObject
 
+- (void)setHostInputView:(UIView *)view;
+- (void)setLocalControlsPresented:(BOOL)presented;
+- (void)setLocalControlPadEnabled:(BOOL)enabled;
+
 @property (readonly) bool shallDisableGyroHotSwitch;
 
 +(nullable ControllerSupport*) sharedInstance;

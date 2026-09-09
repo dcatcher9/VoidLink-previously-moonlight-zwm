@@ -9,16 +9,16 @@
 class InertialScroller {
     public var decelerationRateX: CGFloat
     public var decelerationRateY: CGFloat
+    private let deliverOnMainThread: Bool
 
     public lazy var timer: SafeTimer? = {
         SafeTimer(interval: 1/displayLinkRate) { [weak self] in
-            guard let self = self, handler != nil else {return}
-            self.vector.dx = self.vector.dx * decelerationRateX
-            self.vector.dy = self.vector.dy * decelerationRateY
-            if abs(self.vector.dx) < self.timerSuspendThreshold && abs(self.vector.dy) < self.timerSuspendThreshold {
-                self.timer?.pause()
+            guard let self = self else { return }
+            if self.deliverOnMainThread {
+                DispatchQueue.main.async { [weak self] in self?.tick() }
+            } else {
+                self.tick()
             }
-            (self.handler ?? {})()
         }
     }()
     
@@ -27,10 +27,22 @@ class InertialScroller {
     public var timerSuspendThreshold: CGFloat = 0.06
     public var handler: (() -> Void)?
     
-    init(decelerationRate: CGFloat = 0.93, displayLinkRate: CGFloat = 60, handler: (() -> Void)? = nil) {
+    init(decelerationRate: CGFloat = 0.93, displayLinkRate: CGFloat = 60,
+         deliverOnMainThread: Bool = false, handler: (() -> Void)? = nil) {
         self.decelerationRateX = decelerationRate
         self.decelerationRateY = decelerationRate
         self.displayLinkRate = displayLinkRate
         self.handler = handler
+        self.deliverOnMainThread = deliverOnMainThread
+    }
+
+    private func tick() {
+        guard let handler else { return }
+        vector.dx *= decelerationRateX
+        vector.dy *= decelerationRateY
+        if abs(vector.dx) < timerSuspendThreshold && abs(vector.dy) < timerSuspendThreshold {
+            timer?.pause()
+        }
+        handler()
     }
 }

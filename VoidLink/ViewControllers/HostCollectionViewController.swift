@@ -9,9 +9,18 @@
 import UIKit
 
 @objcMembers
-class HostCell: UICollectionViewCell {
+class HostCell: UICollectionViewCell, ControllerNavigationHighlightTargetProviding {
     var cardView: HostCardView?
     private weak var parentVC: UIViewController?
+
+    var controllerNavigationHighlightTargetView: UIView {
+        cardView ?? contentView
+    }
+
+    func controllerNavigationHighlightDidClear() {
+        cardView?.layer.borderWidth = 1
+        cardView?.layer.borderColor = SunlightUITheme.tileBorderColor().cgColor
+    }
 
     override func prepareForReuse() {
         super.prepareForReuse()
@@ -20,9 +29,7 @@ class HostCell: UICollectionViewCell {
     }
 
     private func getHostCardSizeFactor() -> CGFloat {
-        let dummyHost = TemporaryHost()
-        let dummyCard = HostCardView(host: dummyHost)
-        return contentView.bounds.size.height / dummyCard.size.height
+        contentView.bounds.size.height / HostCardView.unscaledHeight
     }
 
     private func viewController() -> UIViewController? {
@@ -72,7 +79,8 @@ class HostCollectionViewController: UICollectionViewController, UICollectionView
     private(set) var items = NSMutableArray()
 
     private var collectionViewHeightConstraint: NSLayoutConstraint?
-    private var superViewBottomConstraint: NSLayoutConstraint?
+    private var viewportBottomConstraint: NSLayoutConstraint?
+    private weak var heightLimitSuperview: UIView?
     private let flowLayout: UICollectionViewFlowLayout
     private var horizontalPadding: CGFloat
 
@@ -93,6 +101,7 @@ class HostCollectionViewController: UICollectionViewController, UICollectionView
         super.init(collectionViewLayout: layout)
 
         collectionViewHeightConstraint = collectionView.heightAnchor.constraint(equalToConstant: 50)
+        collectionViewHeightConstraint?.priority = UILayoutPriority(999)
         collectionViewHeightConstraint?.isActive = true
     }
 
@@ -130,6 +139,26 @@ class HostCollectionViewController: UICollectionViewController, UICollectionView
 
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
+        if parent == nil { clearHeightLimit() }
+        else { updateHeightLimit() }
+    }
+
+    private func clearHeightLimit() {
+        viewportBottomConstraint?.isActive = false
+        viewportBottomConstraint = nil
+        heightLimitSuperview = nil
+    }
+
+    private func updateHeightLimit() {
+        guard let parentView = viewIfLoaded?.superview else {
+            clearHeightLimit()
+            return
+        }
+        guard parentView !== heightLimitSuperview else { return }
+        clearHeightLimit()
+        heightLimitSuperview = parentView
+        viewportBottomConstraint = view.bottomAnchor.constraint(lessThanOrEqualTo: parentView.safeAreaLayoutGuide.bottomAnchor)
+        viewportBottomConstraint?.isActive = true
     }
 
     func addHost(_ host: TemporaryHost) {
@@ -175,19 +204,11 @@ class HostCollectionViewController: UICollectionViewController, UICollectionView
         super.viewDidLayoutSubviews()
 
         let contentHeight = collectionView.collectionViewLayout.collectionViewContentSize.height
-        if let superview = view.superview {
-            let contentExceedsView = contentHeight > superview.bounds.size.height - view.frame.origin.y
-            if contentExceedsView {
-                if superViewBottomConstraint == nil {
-                    superViewBottomConstraint = view.bottomAnchor.constraint(equalTo: superview.safeAreaLayoutGuide.bottomAnchor)
-                    superViewBottomConstraint?.isActive = true
-                }
-            } else {
-                collectionViewHeightConstraint?.constant = contentHeight
-            }
-        } else {
-            collectionViewHeightConstraint?.constant = contentHeight
-        }
+        // Prefer the content height but let the safe-area ceiling win when it
+        // overflows. Auto Layout also responds when only the parent height
+        // changes; it need not wait for a child layout callback to clamp again.
+        updateHeightLimit()
+        collectionViewHeightConstraint?.constant = contentHeight
 
         switch numberOfRowsInCollectionView() {
         case 1:

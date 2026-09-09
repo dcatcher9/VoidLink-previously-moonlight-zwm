@@ -49,11 +49,11 @@ static const float POLL_RATE = 2.0f; // Poll every 2 seconds
     
     NSArray *poolSnapshot = [_host.activeAddressPool copy];
     for (NSString *address in poolSnapshot) {
-        if ([address containsString:@":"]) break;
+        if ([address containsString:@":"]) continue;
         [array addObject:address];
     }
     for (NSString *address in poolSnapshot) {
-        if (![address containsString:@":"]) break;
+        if (![address containsString:@":"]) continue;
         [array addObject:address];
     }
     

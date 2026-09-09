@@ -10,6 +10,7 @@
 #import <UIKit/UIGestureRecognizerSubclass.h>
 #import "CustomTapGestureRecognizer.h"
 #import "VoidLink-Swift.h"
+#import "StreamView.h"
 
 // The most accurate & reliable tap gesture recognizer of iOS:
 // - Almost 100% recoginition rate. UITapGestureRecognizer of Apple API fails frequently, just a piece of crap.
@@ -26,6 +27,7 @@ static CGFloat screenWidthInPoints;
 
 - (instancetype)initWithTarget:(nullable id)target action:(nullable SEL)action {
     self = [super initWithTarget:target action:action];
+    self.delegate = (id<UIGestureRecognizerDelegate>)self;
     screenHeightInPoints = CGRectGetHeight([[UIScreen mainScreen] bounds]);
     screenWidthInPoints = CGRectGetWidth([[UIScreen mainScreen] bounds]);
     lowestTouchPointYCoord = 0.0;
@@ -104,6 +106,24 @@ static CGFloat screenWidthInPoints;
         }
     }
     if (allTouchesCount == [touches count]) _isOnScreenControllerBeingPressed = false; // need to reset this flag anyway, when all fingers are lefting
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer shouldReceiveTouch:(UITouch *)touch {
+    if (_touchCapturingView && touch.view != _touchCapturingView) return NO;
+    if ([_touchCapturingView isKindOfClass:StreamView.class])
+        return ((StreamView *)_touchCapturingView).hostInputAllowed;
+    return YES;
+}
+
+- (void)reset {
+    [super reset];
+    _gestureCaptured = false;
+    _isOnScreenControllerBeingPressed = false;
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    _gestureCaptured = false;
+    self.state = UIGestureRecognizerStateFailed;
 }
 
 @end
