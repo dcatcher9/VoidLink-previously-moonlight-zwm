@@ -20,6 +20,7 @@
 #import "SunlightMachineControlsSettings.h"
 #import "SunlightUITheme.h"
 #import "SunlightMoonlightIcons.h"
+#import "StreamConfiguration.h"
 
 #import <UIKit/UIGestureRecognizerSubclass.h>
 
@@ -99,10 +100,12 @@ static NSDictionary<NSString *, NSNumber *> *SLFlatGlobalQualityEdits(NSArray<NS
     NSMutableDictionary<NSString *, MenuSectionView *> *_globalSettingsSections;
     UISegmentedControl *_globalControlModeSelector;
     UISwitch *_globalTouchEnabledSwitch;
+    UISwitch *_globalVirtualDisplayOnlySwitch;
     NSDictionary<NSString *, NSNumber *> *_globalControlsBaseline;
     NSArray<NSNumber *> *_flatGlobalFrameRates;
     UILabel *_globalScopeLabel;
     UILabel *_globalControlsExplanationLabel;
+    UILabel *_globalVirtualDisplayExplanationLabel;
     CGFloat softKeyboardHeight;
     bool settingsViewJustLoaded;
     bool settingsViewJustExpanded;
@@ -348,7 +351,8 @@ CMVideoDimensions resolutionTable[RESOLUTION_TABLE_SIZE];
                 explanationWidthChanged = YES;
             }
         }
-        for (UILabel *label in @[_globalScopeLabel ?: (id)NSNull.null, _globalControlsExplanationLabel ?: (id)NSNull.null]) {
+        for (UILabel *label in @[_globalScopeLabel ?: (id)NSNull.null, _globalControlsExplanationLabel ?: (id)NSNull.null,
+                                 _globalVirtualDisplayExplanationLabel ?: (id)NSNull.null]) {
             if (![label isKindOfClass:UILabel.class]) continue;
             CGFloat width = CGRectGetWidth(label.superview.bounds);
             if (width > 0 && fabs(label.preferredMaxLayoutWidth - width) > 0.5) {
@@ -1081,6 +1085,28 @@ BOOL isCustomResolution(int resolutionSelected) {
     [self updateResolutionDisplayLabel];
 }
 
+- (void)addGlobalVirtualDisplaySetting {
+    _globalVirtualDisplayOnlySwitch = [[UISwitch alloc] init];
+    _globalVirtualDisplayOnlySwitch.on = [StreamConfiguration virtualDisplayOnlyWithDefaults:NSUserDefaults.standardUserDefaults];
+    UIStackView *row = [self globalControlRowWithTitle:NSLocalizedString(@"Use virtual display only while streaming", nil)
+        control:_globalVirtualDisplayOnlySwitch identifier:@"global.settings.virtual-display-only"];
+    [videoSection addSubStackView:row];
+    [videoSection.rootStackView insertArrangedSubview:row atIndex:0];
+
+    UILabel *explanation = [[UILabel alloc] init];
+    _globalVirtualDisplayExplanationLabel = explanation;
+    explanation.text = NSLocalizedString(@"While streaming a virtual display, the host disables ordinary PC displays and keeps the cursor on the streamed desktop. Supported glasses displays stay active. Requires a supported Sunshine 3D host; older hosts are unchanged. Applies on the next connection.", nil);
+    explanation.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    explanation.adjustsFontForContentSizeCategory = YES;
+    explanation.textColor = SunlightUITheme.secondaryTextColor;
+    explanation.numberOfLines = 0;
+    explanation.accessibilityIdentifier = @"global.settings.virtual-display-explanation";
+    _globalVirtualDisplayOnlySwitch.accessibilityHint = explanation.text;
+    UIStackView *explanationRow = [[UIStackView alloc] initWithArrangedSubviews:@[explanation]];
+    [videoSection addSubStackView:explanationRow];
+    [videoSection.rootStackView insertArrangedSubview:explanationRow atIndex:1];
+}
+
 - (void)configureFlatGlobalValueControls {
     // Keep the original codec indices intact and add Auto after them. The old
     // sidebar maps Auto onto a concrete codec; this page must preserve it.
@@ -1153,6 +1179,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         ((UILabel *)self.resolutionSelectorStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Resolution", nil);
         ((UILabel *)self.fpsStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Max frame rate", nil);
         ((UILabel *)self.bitrateStack.arrangedSubviews.firstObject).text = NSLocalizedString(@"Max bitrate", nil);
+        [self addGlobalVirtualDisplaySetting];
     }
     NSDictionary *titles = @{@"SettingsSectionVideo": @"Default video & quality", @"SettingsSectionTouch&Controller": @"Touch & pointer",
         @"SettingsSectionController": @"Controllers", @"SettingsSectionMotionControl": @"Motion controls", @"SettingsSectionPencil": @"Pencil",
@@ -4671,7 +4698,8 @@ BOOL isCustomResolution(int resolutionSelected) {
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
         BOOL explanatory = [label.accessibilityIdentifier isEqualToString:@"global.settings.scope"] ||
-            [label.accessibilityIdentifier isEqualToString:@"global.settings.controls-explanation"];
+            [label.accessibilityIdentifier isEqualToString:@"global.settings.controls-explanation"] ||
+            [label.accessibilityIdentifier isEqualToString:@"global.settings.virtual-display-explanation"];
         label.textColor = explanatory ? SunlightUITheme.secondaryTextColor : SunlightUITheme.primaryTextColor;
     }
     view.tintColor = SunlightUITheme.accentColor;
@@ -4696,6 +4724,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         UIFont *footnote = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote compatibleWithTraitCollection:self.traitCollection];
         _globalScopeLabel.font = footnote;
         _globalControlsExplanationLabel.font = footnote;
+        _globalVirtualDisplayExplanationLabel.font = footnote;
         for (MenuSectionView *section in _globalSettingsSections.allValues) {
             section.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline compatibleWithTraitCollection:self.traitCollection];
             [self updateGlobalSectionHeaderLayout:section];
@@ -4957,7 +4986,8 @@ BOOL isCustomResolution(int resolutionSelected) {
         @"enableHdr": @(self.hdrSwitch.isOn), @"fullColorRange": @(self.fullColorRangeSwitch.isOn),
         @"framePacingMode": @(self.framePacingModeSelector.selectedSegmentIndex),
         @"audioConfig": audioIndex >= 0 && audioIndex < (NSInteger)audioModes.count ? audioModes[audioIndex] : tempSettings.audioConfig ?: @2,
-        @"playAudioOnPC": @(self.audioOnPcSwitch.isOn)}];
+        @"playAudioOnPC": @(self.audioOnPcSwitch.isOn),
+        @"virtualDisplayOnly": @(_globalVirtualDisplayOnlySwitch.isOn)}];
     return values;
 }
 
@@ -5093,6 +5123,10 @@ BOOL isCustomResolution(int resolutionSelected) {
     DataManager *latest = [[DataManager alloc] init];
     NSNumber *externalMode = edited[@"externalDisplayMode"];
     [edited removeObjectForKey:@"externalDisplayMode"];
+    // This is a global connection preference, not a Core Data or Pad setting.
+    // Untouched controls leave newer defaults from another editor intact.
+    NSNumber *virtualDisplayOnly = edited[@"virtualDisplayOnly"];
+    [edited removeObjectForKey:@"virtualDisplayOnly"];
     if (edited[@"redirectMic"] && ![MicHandler permissionGranted]) edited[@"redirectMic"] = @NO;
     if (edited.count) {
         Settings *record = [latest retrieveSettings];
@@ -5108,6 +5142,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         }];
     }
     if (externalMode) [latest updateExternalDisplayMode:externalMode.integerValue error:nil];
+    if (virtualDisplayOnly) [StreamConfiguration setVirtualDisplayOnly:virtualDisplayOnly.boolValue defaults:NSUserDefaults.standardUserDefaults];
     if (profileEdits.count) {
         OSCProfile *profile = [oscProfileMan getSelectedProfile];
         [profile setValuesForKeysWithDictionary:profileEdits];
@@ -5126,7 +5161,7 @@ BOOL isCustomResolution(int resolutionSelected) {
         _globalControlsBaseline = controlValues;
         _globalQualitySelectionAtLastSave = qualitySelection;
     }
-    if (edited.count || externalMode || profileEdits.count || controlEdits.count) {
+    if (edited.count || externalMode || virtualDisplayOnly || profileEdits.count || controlEdits.count) {
         if (self.globalCategorySaved) self.globalCategorySaved();
     }
 }

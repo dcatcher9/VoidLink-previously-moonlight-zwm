@@ -844,6 +844,7 @@ static NSMutableSet* hostList;
     [self updateResolutionAccordingly];
     self.revealViewController.isStreaming = true; // tell the revealViewController streaming is started.
     _streamConfig = [[StreamConfiguration alloc] init];
+    _streamConfig.virtualDisplayOnly = [StreamConfiguration virtualDisplayOnlyWithDefaults:NSUserDefaults.standardUserDefaults];
 #if !TARGET_OS_TV
     if (@available(iOS 13.0, *)) {
         NSNumber *outputMode = [[[DataManager alloc] init] getSettings].externalDisplayMode;

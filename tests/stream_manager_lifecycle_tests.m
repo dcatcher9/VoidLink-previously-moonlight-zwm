@@ -20,6 +20,10 @@
 @property TemporarySettings *rendererPresentation;
 @property TemporarySettings *connectionPresentation;
 @property BOOL hostSessionSupported;
+@property BOOL authenticatedServerInfo;
+@property (copy) NSString *virtualDisplayOnlyCapability;
+@property BOOL disableVirtualDisplayOnly;
+@property (copy) NSDictionary *launchParameters;
 @property BOOL deliberateReconnect;
 @property NSInteger activeSessionResponses;
 @property NSInteger resumeAttempts;
@@ -106,6 +110,11 @@ static ManagerTestState *currentState;
 - (NSURLRequest *)newServerInfoRequest:(BOOL)fastFail { return [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://fixture.invalid/serverinfo"]]; }
 - (NSURLRequest *)newHttpServerInfoRequest { return [self newServerInfoRequest:NO]; }
 - (NSURLRequest *)newLaunchOrResumeRequest:(NSString *)verb config:(StreamConfiguration *)config {
+    NSMutableDictionary *parameters = [NSMutableDictionary dictionary];
+    for (NSURLQueryItem *item in [config sunlightLaunchQueryItemsForResume:[verb isEqualToString:@"resume"]]) {
+        parameters[item.name] = item.value;
+    }
+    _state.launchParameters = parameters;
     return [NSURLRequest requestWithURL:[NSURL URLWithString:[@"https://fixture.invalid/" stringByAppendingString:verb]]];
 }
 - (void)executeRequestSynchronously:(HttpRequest *)request {
@@ -114,9 +123,14 @@ static ManagerTestState *currentState;
     if (_state.requestHook) _state.requestHook(path);
     NSString *xml;
     if ([path isEqualToString:@"/serverinfo"]) {
+        request.authenticatedResponse = _state.authenticatedServerInfo;
         xml = _state.failServerInfo ? @"<root status_code=\"500\" status_message=\"fixture failure\"/>" :
             [NSString stringWithFormat:@"<root status_code=\"200\"><PairStatus>1</PairStatus><appversion>7.1.431.0</appversion><state>SUNSHINE_SERVER_%@</state><currentgame>%@</currentgame><ServerCodecModeSupport>1</ServerCodecModeSupport>%@</root>", _state.resume ? @"BUSY" : @"FREE", _state.runningApp,
                 _state.hostSessionSupported ? [NSString stringWithFormat:@"<hostsessionid>%@</hostsessionid>", _state.sessionToken] : @""];
+        if (_state.virtualDisplayOnlyCapability != nil) {
+            xml = [xml stringByReplacingOccurrencesOfString:@"</root>" withString:
+                [NSString stringWithFormat:@"<VirtualDisplayOnlySupported>%@</VirtualDisplayOnlySupported></root>", _state.virtualDisplayOnlyCapability]];
+        }
     } else {
         if ([path isEqualToString:@"/resume"]) _state.resumeAttempts++;
         if ([path isEqualToString:@"/resume"] &&
@@ -175,6 +189,7 @@ static StreamManager *NewManager(void) {
     config.glassesOutputEnabled = currentState.glassesOutput;
     config.presentationSettings = currentState.frozenPresentation;
     config.reconnectRetainedSession = currentState.deliberateReconnect;
+    config.virtualDisplayOnly = !currentState.disableVirtualDisplayOnly;
     if (currentState.deliberateReconnect && currentState.hostSessionSupported) config.expectedHostSessionId = @"17";
     return [[StreamManager alloc] initWithConfig:config renderView:[UIView new] connectionCallbacks:currentState];
 }
@@ -221,6 +236,58 @@ static void Run(NSString *name, void (^body)(void)) {
 }
 int main(void) {
     @autoreleasepool {
+        for (NSNumber *resume in @[@NO, @YES]) {
+            for (NSNumber *enabled in @[@YES, @NO]) {
+                Run([NSString stringWithFormat:@"authenticated virtual-display-only choice %@ on %@", enabled, resume.boolValue ? @"resume" : @"launch"], ^{
+                    currentState.resume = resume.boolValue;
+                    currentState.authenticatedServerInfo = YES;
+                    currentState.virtualDisplayOnlyCapability = @"1";
+                    currentState.disableVirtualDisplayOnly = !enabled.boolValue;
+                    StreamManager *manager = NewManager();
+                    [manager main];
+                    PumpUntil(^BOOL{ return currentState.connectionStarts == 1; });
+                    Require([currentState.launchParameters[@"virtualDisplayOnly"] isEqualToString:enabled.boolValue ? @"1" : @"0"] &&
+                            currentState.launchParameters[@"virtualDisplay"] == nil,
+                            @"authenticated capability must send explicit preference without requesting virtual backing");
+                    [manager stopStream];
+                });
+            }
+            for (id capability in @[@"1", @"0", @"true", @"01", @"2", NSNull.null]) {
+                for (NSNumber *authenticated in @[@NO, @YES]) {
+                    if (authenticated.boolValue && [capability isEqual:@"1"]) continue;
+                    Run([NSString stringWithFormat:@"capability %@ with authenticated=%@ is omitted on %@", capability, authenticated, resume.boolValue ? @"resume" : @"launch"], ^{
+                        currentState.resume = resume.boolValue;
+                        currentState.authenticatedServerInfo = authenticated.boolValue;
+                        currentState.virtualDisplayOnlyCapability = capability == NSNull.null ? nil : capability;
+                        StreamManager *manager = NewManager();
+                        [manager main];
+                        PumpUntil(^BOOL{ return currentState.connectionStarts == 1; });
+                        Require(currentState.launchParameters[@"virtualDisplayOnly"] == nil,
+                                @"HTTP fallback, malformed capability and older hosts must receive no display-policy request");
+                        [manager stopStream];
+                    });
+                }
+            }
+        }
+        Run(@"resume retry discards the previous response's display capability", ^{
+            currentState.resume = currentState.hostSessionSupported = currentState.deliberateReconnect = YES;
+            currentState.authenticatedServerInfo = YES;
+            currentState.virtualDisplayOnlyCapability = @"1";
+            currentState.activeSessionResponses = 1;
+            currentState.requestHook = ^(NSString *path) {
+                if ([path isEqualToString:@"/serverinfo"] && currentState.resumeAttempts == 1) {
+                    Require([currentState.launchParameters[@"virtualDisplayOnly"] isEqualToString:@"1"], @"first attempt should use authenticated capability");
+                    currentState.authenticatedServerInfo = NO;
+                }
+            };
+            StreamManager *manager = NewManager();
+            [manager main];
+            PumpUntil(^BOOL{ return currentState.connectionStarts == 1; });
+            Require(currentState.resumeAttempts == 2 && currentState.launchParameters[@"virtualDisplayOnly"] == nil,
+                    @"retry must not reuse capability from an earlier authenticated response");
+            [manager stopStream];
+        });
+
         Run(@"stop before main prevents crypto, HTTP and decoder startup", ^{
             StreamManager *manager = NewManager();
             [manager stopStream];

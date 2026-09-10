@@ -1,6 +1,64 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Use virtual display only while streaming" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use virtual display only while streaming"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流时仅使用虚拟显示器"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流時僅使用虛擬顯示器"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流時只使用虛擬顯示器"
+          }
+        }
+      }
+    },
+    "While streaming a virtual display, the host disables ordinary PC displays and keeps the cursor on the streamed desktop. Supported glasses displays stay active. Requires a supported Sunshine 3D host; older hosts are unchanged. Applies on the next connection." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "While streaming a virtual display, the host disables ordinary PC displays and keeps the cursor on the streamed desktop. Supported glasses displays stay active. Requires a supported Sunshine 3D host; older hosts are unchanged. Applies on the next connection."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流虚拟显示器时，主机会停用普通电脑显示器，并将鼠标光标保持在串流桌面上。受支持的眼镜显示器仍会启用。需要支持此功能的 Sunshine 3D 主机；旧版主机不受影响。下次连接时生效。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流虛擬顯示器時，主機會停用一般電腦顯示器，並將滑鼠游標保持在串流桌面上。支援的眼鏡顯示器仍會啟用。需要支援此功能的 Sunshine 3D 主機；舊版主機不受影響。下次連線時生效。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流虛擬顯示器時，主機會停用一般電腦顯示器，並將滑鼠游標保持在串流桌面上。支援的眼鏡顯示器仍會啟用。需要支援此功能的 Sunshine 3D 主機；舊版主機不受影響。下次連線時生效。"
+          }
+        }
+      }
+    },
     "\nHost processing latency min/max/avg: %.1f/%.1f/%.1f ms" : {
       "extractionState" : "manual",
       "localizations" : {

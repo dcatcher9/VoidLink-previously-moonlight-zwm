@@ -233,6 +233,11 @@ static void TrustTests(void) {
 // NSURLSession endpoint. No socket or TLS server is opened by this fixture.
 static BOOL markAuthenticationFailure;
 static NSUInteger sessionRequests;
+static BOOL fixtureHTTPSSucceeds;
+static NSURL *fixtureResponseURL;
+static NSInteger fixtureHTTPStatus = 200;
+static NSString *fixtureResponseXML;
+static NSString *fixtureHTTPSResponseXML;
 @interface FixtureTask : NSObject
 @property (copy) dispatch_block_t completion;
 - (void)resume;
@@ -250,7 +255,7 @@ static NSUInteger sessionRequests;
     FixtureTask *task = [FixtureTask new];
     task.completion = ^{
         sessionRequests++;
-        if ([request.URL.scheme isEqual:@"https"]) {
+        if ([request.URL.scheme isEqual:@"https"] && !fixtureHTTPSSucceeds) {
             if (markAuthenticationFailure) {
                 TrustSpace *space = [[TrustSpace alloc] initWithHost:@"fixture.invalid" port:47984 protocol:@"https" realm:nil authenticationMethod:NSURLAuthenticationMethodServerTrust];
                 NSURLAuthenticationChallenge *challenge = [[NSURLAuthenticationChallenge alloc] initWithProtectionSpace:space proposedCredential:nil previousFailureCount:0 failureResponse:nil error:nil sender:(id<NSURLAuthenticationChallengeSender>)[NSObject new]];
@@ -260,8 +265,10 @@ static NSUInteger sessionRequests;
             }
             handler(nil, nil, [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
         } else {
-            handler([@"<root status_code=\"200\"><state>FREE</state></root>" dataUsingEncoding:NSUTF8StringEncoding],
-                    [[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:nil], nil);
+            NSString *xml = ([request.URL.scheme isEqual:@"https"] ? fixtureHTTPSResponseXML : nil) ?:
+                fixtureResponseXML ?: @"<root status_code=\"200\"><state>FREE</state><VirtualDisplayOnlySupported>1</VirtualDisplayOnlySupported></root>";
+            handler([xml dataUsingEncoding:NSUTF8StringEncoding],
+                    [[NSHTTPURLResponse alloc] initWithURL:fixtureResponseURL ?: request.URL statusCode:fixtureHTTPStatus HTTPVersion:@"HTTP/1.1" headerFields:nil], nil);
         }
     };
     return (id)task;
@@ -286,7 +293,93 @@ static void RequestAuthenticationTests(void) {
         if (scenario == 1) Check(response.isStatusOk && sessionRequests == 2, @"Explicit certificate cancellation preserves exactly one provided serverinfo fallback");
         else Check(!response.isStatusOk && sessionRequests == 1, @"No fallback is invented, and ordinary cancellation never triggers a plaintext fallback");
         Check([[http valueForKey:@"certificateFailures"] count] == 0, @"Completed request releases its authentication failure/session tracking");
+        Check(!request.authenticatedResponse, @"Certificate cancellation or HTTP fallback cannot advertise an authenticated capability");
     }
+
+    fixtureHTTPSSucceeds = YES;
+    markAuthenticationFailure = NO;
+    NSData *pin = [CryptoManager pemToDer:certificate];
+    HttpManager *http = [[HttpManager alloc] initWithAddress:@"fixture.invalid" httpsPort:47984 serverCert:pin];
+    HttpResponse *response = [HttpResponse new];
+    NSURLRequest *https = [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://fixture.invalid:47984/serverinfo"]];
+    HttpRequest *request = [HttpRequest requestForResponse:response withUrlRequest:https];
+    Check(!request.authenticatedResponse, @"New requests start with no authenticated response");
+    [http executeRequestSynchronously:request];
+    Check(response.isStatusOk && request.authenticatedResponse, @"Successful pinned HTTPS response retains its transport provenance");
+
+    for (NSString *redirect in @[@"http://fixture.invalid:47984/serverinfo", @"https://other.invalid:47984/serverinfo",
+                                @"https://fixture.invalid:47985/serverinfo", @"https://fixture.invalid:47984/unrelated"]) {
+        fixtureResponseURL = [NSURL URLWithString:redirect];
+        [http executeRequestSynchronously:request];
+        Check(response.isStatusOk && !request.authenticatedResponse &&
+              [[response getStringTag:@"VirtualDisplayOnlySupported"] isEqual:@"1"],
+              @"Redirected discovery fields stay readable but cannot borrow authority from another endpoint");
+    }
+    fixtureResponseURL = [NSURL URLWithString:@"https://FIXTURE.invalid:47984/serverinfo"];
+    [http executeRequestSynchronously:request];
+    Check(request.authenticatedResponse, @"DNS host case does not change response origin");
+
+    request.request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://fixture.invalid/serverinfo"]];
+    fixtureResponseURL = [NSURL URLWithString:@"https://fixture.invalid:443/serverinfo"];
+    [http executeRequestSynchronously:request];
+    Check(request.authenticatedResponse, @"Explicit default HTTPS port has the same response origin");
+    request.request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"http://fixture.invalid/serverinfo"]];
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"A plaintext request redirected to HTTPS does not establish capability provenance");
+
+    request.request = https;
+    fixtureResponseURL = nil;
+    [http setServerCert:nil];
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"An HTTPS URL alone without a paired certificate does not establish authority");
+    [http setServerCert:[NSData data]];
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"An empty certificate is not a usable pin");
+    [http setServerCert:pin];
+
+    fixtureHTTPStatus = 503;
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"An HTTP failure carrying successful XML does not advertise capabilities");
+    fixtureHTTPStatus = 200;
+    fixtureResponseXML = @"<root status_code=\"401\"><VirtualDisplayOnlySupported>1</VirtualDisplayOnlySupported></root>";
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"An XML authentication failure cannot advertise capabilities");
+    fixtureResponseXML = @"<root status_code=\"200\"><VirtualDisplayOnlySupported>1";
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse, @"Malformed XML cannot retain an earlier successful response's authority");
+    fixtureResponseXML = nil;
+
+    [http executeRequestSynchronously:request];
+    Check(request.authenticatedResponse, @"A reused request can gain provenance from a new successful response");
+    fixtureHTTPSResponseXML = @"<root status_code=\"401\" status_message=\"Unauthorized\"/>";
+    request.fallbackError = 401;
+    request.fallbackRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@"http://fixture.invalid/serverinfo"]];
+    sessionRequests = 0;
+    [http executeRequestSynchronously:request];
+    Check(sessionRequests == 2 && response.isStatusOk && !request.authenticatedResponse,
+          @"An unauthorized HTTPS response preserves discovery fallback without trusting its advertised capabilities");
+    fixtureHTTPSResponseXML = nil;
+    request.request = https;
+    [http executeRequestSynchronously:request];
+    Check(request.authenticatedResponse, @"A successful request refreshes provenance after unauthorized fallback");
+    fixtureHTTPSSucceeds = NO;
+    markAuthenticationFailure = YES;
+    request.fallbackError = 401;
+    request.fallbackRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@"http://fixture.invalid/serverinfo"]];
+    sessionRequests = 0;
+    [http executeRequestSynchronously:request];
+    Check(sessionRequests == 2 && response.isStatusOk && !request.authenticatedResponse,
+          @"A reused authenticated request loses authority when certificate failure selects its legacy HTTP fallback");
+
+    fixtureHTTPSSucceeds = YES;
+    markAuthenticationFailure = NO;
+    request.request = https;
+    [http executeRequestSynchronously:request];
+    Check(request.authenticatedResponse, @"Pinned request succeeds again after fallback");
+    request.request = nil;
+    [http executeRequestSynchronously:request];
+    Check(!request.authenticatedResponse && !response.isStatusOk, @"Early missing-request failure clears earlier provenance");
+
     method_setImplementation(factory, original); imp_removeBlock(replacement);
 }
 

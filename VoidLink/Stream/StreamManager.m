@@ -106,9 +106,11 @@
 }
 
 - (BOOL)prepareHostSession:(HttpManager *)hMan receiveSessionUrl:(NSString **)sessionUrl {
+    _config.virtualDisplayOnlySupported = NO;
     ServerInfoResponse* serverInfoResp = [[ServerInfoResponse alloc] init];
-    [hMan executeRequestSynchronously:[HttpRequest requestForResponse:serverInfoResp withUrlRequest:[hMan newServerInfoRequest:false]
-                                       fallbackError:401 fallbackRequest:[hMan newHttpServerInfoRequest]]];
+    HttpRequest *serverInfoRequest = [HttpRequest requestForResponse:serverInfoResp withUrlRequest:[hMan newServerInfoRequest:false]
+                                       fallbackError:401 fallbackRequest:[hMan newHttpServerInfoRequest]];
+    [hMan executeRequestSynchronously:serverInfoRequest];
     if (![self isStartupActive]) return NO;
     NSString* pairStatus = [serverInfoResp getStringTag:@"PairStatus"];
     NSString* appversion = [serverInfoResp getStringTag:@"appversion"];
@@ -128,6 +130,9 @@
         [self notifyLaunchFailed:@"Device not paired to PC"];
         return NO;
     }
+
+    _config.virtualDisplayOnlySupported = serverInfoRequest.authenticatedResponse &&
+        [[serverInfoResp getStringTag:@"VirtualDisplayOnlySupported"] isEqualToString:@"1"];
 
     BOOL sessionSupport = [serverInfoResp getStringTag:@"hostsessionid"] != nil;
     uint64_t hostSessionId = 0;

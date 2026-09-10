@@ -37,6 +37,43 @@ static NSDictionary* query(StreamConfiguration* config, BOOL resume) {
 
 int main(void) {
     @autoreleasepool {
+        NSString *suite = [@"sunlight.virtual-display-only-tests." stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+        check([StreamConfiguration virtualDisplayOnlyWithDefaults:defaults], "virtual-display-only defaults on for existing and new installs");
+        check([defaults persistentDomainForName:suite].count == 0, "reading the new default does not persist an override");
+        [StreamConfiguration setVirtualDisplayOnly:NO defaults:defaults];
+        check(![StreamConfiguration virtualDisplayOnlyWithDefaults:defaults], "explicit off survives a reload");
+        [StreamConfiguration setVirtualDisplayOnly:YES defaults:defaults];
+        check([StreamConfiguration virtualDisplayOnlyWithDefaults:defaults], "explicit on survives a reload");
+        for (id invalid in @[@"false", @2, @(-1), @0.5, @[], @{}]) {
+            [defaults setObject:invalid forKey:@"sunlight.global.virtualDisplayOnly"];
+            check([StreamConfiguration virtualDisplayOnlyWithDefaults:defaults], "malformed preference falls back to on");
+        }
+        [defaults removePersistentDomainForName:suite];
+
+        for (NSNumber *mode in @[@(SunlightStreamMode2D), @(SunlightStreamModeHost3D), @(SunlightStreamModeRawFullSBS)]) {
+            StreamConfiguration *display = configuration(mode.integerValue);
+            check(display.virtualDisplayOnly && !display.virtualDisplayOnlySupported, "preference defaults on but host capability defaults off");
+            for (NSNumber *resume in @[@NO, @YES]) {
+                check(query(display, resume.boolValue)[@"virtualDisplayOnly"] == nil, "unsupported host receives no new launch or resume parameter");
+            }
+            display.virtualDisplayOnlySupported = YES;
+            for (NSString *name in @[@"Desktop", @"Virtual Display"]) {
+                display.appName = name;
+                for (NSNumber *resume in @[@NO, @YES]) {
+                    NSDictionary *enabled = query(display, resume.boolValue);
+                    check([enabled[@"virtualDisplayOnly"] isEqualToString:@"1"] && enabled[@"virtualDisplay"] == nil,
+                          "supported host receives enabled choice independently of app name and virtual creation flag");
+                    display.virtualDisplayOnly = NO;
+                    check([query(display, resume.boolValue)[@"virtualDisplayOnly"] isEqualToString:@"0"],
+                          "supported host receives explicit off for launch and resume in every mode");
+                    display.virtualDisplayOnly = YES;
+                }
+            }
+            display.virtualDisplayOnlySupported = NO;
+            check(query(display, YES)[@"virtualDisplayOnly"] == nil, "loss of capability suppresses previously enabled policy");
+        }
+
         StreamConfiguration* flat = configuration(SunlightStreamMode2D);
         check(!flat.requiresMetalPresentation, "device-only 2D preserves the selected backend");
         flat.glassesOutputEnabled = YES;

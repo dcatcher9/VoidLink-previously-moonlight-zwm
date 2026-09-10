@@ -107,6 +107,9 @@
 }
 
 - (void) executeRequestSynchronously:(HttpRequest*)request {
+    // A request can be reused or recursively retried over HTTP after a certificate
+    // failure. Capability negotiation must describe the response that actually won.
+    request.authenticatedResponse = NO;
     // This is a special case to handle failure of HTTPS port fetching
     if (!request.request) {
         if (request.response) {
@@ -119,7 +122,11 @@
 
     __block NSData* requestResp = nil;
     __block NSError* respError = nil;
+    __block BOOL authenticatedTransport = NO;
     __block dispatch_semaphore_t requestLock = dispatch_semaphore_create(0);
+    NSURL *requestedURL = request.request.URL;
+    BOOL pinnedHTTPSRequest = _serverCert.length > 0 &&
+        [requestedURL.scheme.lowercaseString isEqualToString:@"https"];
     
     // Query strings and response bodies contain pairing secrets and session keys.
     Log(LOG_D, @"Request to %@ %@", request.request.URL.host, request.request.URL.path);
@@ -132,6 +139,18 @@
         }
         else {
             Log(LOG_D, @"Received HTTP response: %ld", (long)[(NSHTTPURLResponse*)response statusCode]);
+
+            // NSURLSession may redirect. Successful TLS is pinned by our challenge
+            // delegate, but a redirected HTTP or different endpoint response must
+            // not inherit the original request's host authority. Keep those bodies
+            // available for legacy discovery without trusting new capabilities.
+            NSURL *responseURL = response.URL;
+            NSInteger httpStatus = [(NSHTTPURLResponse *)response statusCode];
+            authenticatedTransport = pinnedHTTPSRequest && httpStatus >= 200 && httpStatus < 300 &&
+                [responseURL.scheme.lowercaseString isEqualToString:@"https"] &&
+                [responseURL.host.lowercaseString isEqualToString:requestedURL.host.lowercaseString] &&
+                [(responseURL.port ?: @443) isEqual:(requestedURL.port ?: @443)] &&
+                [responseURL.path isEqualToString:requestedURL.path];
 
             if (data != NULL) {
                 Log(LOG_D, @"Received %lu response bytes", (unsigned long)data.length);
@@ -156,6 +175,7 @@
     
     if (!respError && request.response) {
         [request.response populateWithData:requestResp];
+        request.authenticatedResponse = authenticatedTransport && request.response.statusCode == 200;
         
         // If the fallback error code was detected, issue the fallback request
         if (request.response.statusCode == request.fallbackError && request.fallbackRequest != NULL) {

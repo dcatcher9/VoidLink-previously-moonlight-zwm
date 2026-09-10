@@ -38,6 +38,12 @@ typedef NS_ENUM(NSInteger, SunlightStreamMode) {
 @property BOOL reconnectRetainedSession;
 @property NSString* hostSessionId;
 @property BOOL requestVirtualDisplay;
+// Global next-connection preference. The authenticated host decides whether
+// the selected app has virtual backing and owns display/cursor restoration.
+@property BOOL virtualDisplayOnly;
+@property BOOL virtualDisplayOnlySupported;
++ (BOOL)virtualDisplayOnlyWithDefaults:(NSUserDefaults *)defaults;
++ (void)setVirtualDisplayOnly:(BOOL)enabled defaults:(NSUserDefaults *)defaults;
 // Capture output preference at connection start so later screen changes keep one decoder consumer.
 @property BOOL glassesOutputEnabled;
 // Detached effective PC/global preferences captured before connection startup.

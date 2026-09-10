@@ -12,6 +12,8 @@
 
 @property (nonatomic) id<Response> response;
 @property (nonatomic) NSURLRequest* request;
+// Provenance of the most recent successful response, never inherited by an HTTP fallback.
+@property (nonatomic) BOOL authenticatedResponse;
 @property (nonatomic) int fallbackError;
 @property (nonatomic) NSURLRequest* fallbackRequest;
 

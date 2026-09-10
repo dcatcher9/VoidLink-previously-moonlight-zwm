@@ -126,6 +126,43 @@ session token, the fresh server response must match it. Otherwise, a freshly sel
 binds the current token before sending `resume`. Successful launch and resume responses must return
 a valid `hostsessionid` on capable hosts, and a resume response must match the bound token.
 
+## Virtual display only
+
+The September 9 integration uses separately refreshed reference checkouts:
+Apollo-3D `ad99d5a6cca9db848d5dc6b35d754d54d0619c0d` and Moonlight Android
+`5d56dfe93631848bf9ebd800421fb4ce49a64ee6`. The original sibling workspaces remain
+untouched. Android still pins shared common-C `3a235790931e8092500e215f4864e696147bf3f6`,
+matching this iOS app; this policy needs no shared-core change.
+
+**Use virtual display only while streaming** is a global preference, enabled by
+default for new and existing iOS installs. It is stored separately from per-PC
+and per-app picture settings and captured at each connection start. An explicit
+off value is preserved. The global settings screen saves only user edits on leave;
+a change applies on the next connection, including a mode reconnect.
+
+Only exact `VirtualDisplayOnlySupported=1` from successful, pinned HTTPS
+`serverinfo` enables the request. HTTP fallback and responses redirected to an
+insecure or different endpoint cannot grant this capability. Supporting hosts receive
+`virtualDisplayOnly=1` or `virtualDisplayOnly=0` on both `/launch` and `/resume`.
+Older hosts receive neither. This is independent of `hostsessionid`, app name,
+picture mode and `virtualDisplay`: the host classifies virtual backing, including
+its generated Virtual Display tile. Existing iOS source and Raw geometry are
+unchanged, and physical-display streams remain physical.
+
+For virtual-backed sessions, the host temporarily disables ordinary physical
+displays, makes the virtual desktop primary, and automatically manages the shared
+Windows cursor. Approved AR outputs can remain active when needed for scanout;
+the host confines the cursor to the virtual desktop in that case. Disconnect,
+reconnect grace and teardown restore the previous topology according to the host's
+recovery policy. A retained session owner or a client with launch permission may
+change the preference on resume; another view-only client inherits its existing
+choice. These are host responsibilities, not client-side monitor manipulation.
+
+The temporary iOS first-frame cursor centering, extra readiness gate and associated
+handoff/tests were removed. Input uses the original connection/lifetime gate and
+normal relative/absolute protocol, without cursor warping or confinement flags.
+See the host's [virtual desktop contract](https://github.com/dcatcher9/Apollo-3D/blob/ad99d5a6cca9db848d5dc6b35d754d54d0619c0d/docs/virtual-desktop.md).
+
 ## Runtime controls intentionally deferred
 
 Latest Apollo accepts only the atomic presentation V2 control body for live mode changes. The

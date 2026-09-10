@@ -10,8 +10,26 @@
 #include <Limelight.h>
 #include <math.h>
 
+static NSString * const SunlightVirtualDisplayOnlyKey = @"sunlight.global.virtualDisplayOnly";
+
 @implementation StreamConfiguration
 @synthesize host, httpsPort, appID, width, height, frameRate, bitRate, riKeyId, riKey, gamepadMask, appName, optimizeGameSettings, playAudioOnPC, swapABXYButtons, buttonVisualFeedback, gyroMode, emulatedControllerType, hapticEngine,  audioConfiguration, supportedVideoFormats, multiController, serverCert, rtspSessionUrl, serverCodecModeSupport, enableYUV444, enablePIP, fullColorRange, enableHdr, sdrPerformanceWorkaround, localVolume;
+
+- (instancetype)init {
+    if ((self = [super init])) _virtualDisplayOnly = YES;
+    return self;
+}
+
++ (BOOL)virtualDisplayOnlyWithDefaults:(NSUserDefaults *)defaults {
+    id value = [defaults objectForKey:SunlightVirtualDisplayOnlyKey];
+    if (![value isKindOfClass:NSNumber.class] ||
+        ([value doubleValue] != 0 && [value doubleValue] != 1)) return YES;
+    return [value boolValue];
+}
+
++ (void)setVirtualDisplayOnly:(BOOL)enabled defaults:(NSUserDefaults *)defaults {
+    [defaults setBool:enabled forKey:SunlightVirtualDisplayOnlyKey];
+}
 
 - (BOOL)isStereoStream {
     return self.streamMode != SunlightStreamMode2D;
@@ -230,6 +248,9 @@
     }
     if (self.requestVirtualDisplay) {
         [items addObject:[NSURLQueryItem queryItemWithName:@"virtualDisplay" value:@"1"]];
+    }
+    if (self.virtualDisplayOnlySupported) {
+        [items addObject:[NSURLQueryItem queryItemWithName:@"virtualDisplayOnly" value:self.virtualDisplayOnly ? @"1" : @"0"]];
     }
     if (self.hostSessionIdSupported) {
         [items addObject:[NSURLQueryItem queryItemWithName:@"sbsMode" value:self.initialHostSbsMode ? @"1" : @"0"]];
